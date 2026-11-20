@@ -260,9 +260,14 @@
                   <span class="switch-track"></span>
                 </label>
               </div>
-              <button class="btn btn-soft btn-full" id="bsSaveTpl">
-                <i data-icon="sparkles"></i><span>Запомнить образец баннера</span>
-              </button>
+              <div class="input-row">
+                <button class="btn btn-soft btn-full" id="bsSaveTpl">
+                  <i data-icon="sparkles"></i><span>Запомнить образец</span>
+                </button>
+                <button class="btn btn-subtle" id="bsTestDetect" title="Проверить детекцию баннера на видео">
+                  <i data-icon="search"></i><span>Тест</span>
+                </button>
+              </div>
             </div>
 
             <div class="inspector-footer-btns">
@@ -309,6 +314,7 @@
         <button class="btn-icon" id="playerClose"><i data-icon="x"></i></button>
       </div>
       <video id="lightboxVideo" controls autoplay playsinline></video>
+      <div class="player-markers-row" id="playerMarkersRow"></div>
     </div>
   </div>
 

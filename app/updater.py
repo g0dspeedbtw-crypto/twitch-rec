@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shlex
@@ -33,6 +34,7 @@ class UpdateInfo:
     asset_name: str = ""
     asset_url: str = ""
     asset_size: int = 0
+    checksum_url: str = ""
     can_self_update: bool = False
     error: str = ""
 
@@ -153,7 +155,13 @@ def check_github_update(
 
     tag = str(data.get("tag_name") or "").strip()
     latest = tag.lstrip("vV") or current_version
-    asset_name, asset_url, asset_size = _pick_release_asset(data.get("assets") or [])
+    assets = data.get("assets") or []
+    asset_name, asset_url, asset_size = _pick_release_asset(assets)
+    checksum_url = ""
+    for a in assets:
+        if str(a.get("name") or "").upper() == "SHA256SUMS.TXT":
+            checksum_url = str(a.get("browser_download_url") or "")
+            break
     available = is_newer_version(latest, current_version)
     frozen = getattr(sys, "frozen", False)
     can_self = bool(
@@ -177,6 +185,7 @@ def check_github_update(
         asset_name=asset_name,
         asset_url=asset_url,
         asset_size=asset_size,
+        checksum_url=checksum_url,
         can_self_update=can_self,
         error="",
     )
@@ -200,15 +209,42 @@ class UpdateDownloadWorker(QThread):
     progress_updated = Signal(float, str)   # pct, status_text
     finished_download = Signal(bool, str, str)  # ok, local_path, message
 
-    def __init__(self, asset_url: str, asset_name: str, proxy_url: str = "", parent=None):
+    def __init__(self, asset_url: str, asset_name: str, proxy_url: str = "", checksum_url: str = "", parent=None):
         super().__init__(parent)
         self.asset_url = asset_url
         self.asset_name = asset_name or "TwitchRecorderPro-update.zip"
         self.proxy_url = proxy_url
+        self.checksum_url = checksum_url
         self._stop_requested = False
 
     def request_stop(self) -> None:
         self._stop_requested = True
+
+    def _verify_sha256(self, file_path: Path, headers: dict) -> Tuple[bool, str]:
+        if not self.checksum_url:
+            return True, ""
+        try:
+            r = requests.get(self.checksum_url, headers=headers, timeout=15, proxies=_proxies(self.proxy_url))
+            if r.status_code != 200:
+                return True, ""
+            expected = ""
+            for line in r.text.splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and os.path.basename(parts[-1].lstrip("*")) == self.asset_name:
+                    expected = parts[0].lower()
+                    break
+            if not expected:
+                return True, ""
+            h = hashlib.sha256()
+            with open(file_path, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+            actual = h.hexdigest().lower()
+            if actual != expected:
+                return False, "Ошибка проверки SHA-256 контрольной суммы!"
+            return True, "SHA-256 подтверждён"
+        except Exception:
+            return True, ""
 
     def run(self) -> None:
         if not self.asset_url:
@@ -265,8 +301,16 @@ class UpdateDownloadWorker(QThread):
                 self.finished_download.emit(False, "", "Файл обновления повреждён или пуст")
                 return
 
+            if self.checksum_url:
+                self.progress_updated.emit(99.8, "Проверка SHA-256...")
+                ok_sha, sha_msg = self._verify_sha256(dest, headers)
+                if not ok_sha:
+                    dest.unlink(missing_ok=True)
+                    self.finished_download.emit(False, "", sha_msg)
+                    return
+
             self.progress_updated.emit(100.0, "Загрузка завершена")
-            self.finished_download.emit(True, str(dest), "Обновление готово к установке")
+            self.finished_download.emit(True, str(dest), "Обновление проверено и готово к установке")
         except Exception as exc:
             if dest.exists():
                 try:

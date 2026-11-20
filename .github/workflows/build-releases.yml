@@ -73,6 +73,21 @@ jobs:
               txt = re.sub(r'APP_VERSION\s*=\s*"[^"]*"', f'APP_VERSION = "{m.group(1)}"', txt)
           p.write_text(txt, encoding="utf-8")
           PY
+      - name: Fetch Static macOS FFmpeg & FFprobe (Portable)
+        run: |
+          mkdir -p bin
+          ARCH="$(uname -m)"
+          echo "Runner arch: $ARCH"
+          if [ "$ARCH" = "arm64" ]; then
+            FF_URL="https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip"
+            FP_URL="https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffprobe.zip"
+          else
+            FF_URL="https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffmpeg.zip"
+            FP_URL="https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffprobe.zip"
+          fi
+          curl -fSL "$FF_URL" -o /tmp/ffmpeg.zip && unzip -o /tmp/ffmpeg.zip -d bin/ && chmod +x bin/ffmpeg || rm -f bin/ffmpeg
+          curl -fSL "$FP_URL" -o /tmp/ffprobe.zip && unzip -o /tmp/ffprobe.zip -d bin/ && chmod +x bin/ffprobe || rm -f bin/ffprobe
+          ls -la bin/
       - name: Build macOS .app, .zip and .dmg
         run: |
           chmod +x build/build_macos.sh
@@ -93,6 +108,11 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+      - name: Generate SHA256SUMS.txt
+        run: |
+          cd release-assets
+          sha256sum TwitchRecorderPro-Windows.zip TwitchRecorderPro-macOS.dmg TwitchRecorderPro-macOS.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -103,3 +123,4 @@ jobs:
             release-assets/TwitchRecorderPro-Windows.zip
             release-assets/TwitchRecorderPro-macOS.dmg
             release-assets/TwitchRecorderPro-macOS.zip
+            release-assets/SHA256SUMS.txt

@@ -6,6 +6,7 @@ dist/
 recordings/
 templates/
 config.json
+bin/
 TwitchRecorderPro-Windows.zip
 *.dmg
 *.lnk

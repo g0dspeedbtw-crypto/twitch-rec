@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import uuid
+import zipfile
 from collections import deque
 from copy import deepcopy
 from dataclasses import asdict
@@ -23,8 +25,23 @@ from app.chat_and_ai import (
     WhisperAIWorker,
     analyze_chat_highlights,
     detect_loud_moments,
+    fetch_twitch_vod_chat,
+    generate_youtube_metadata,
+    save_markers_and_edl,
 )
-from app.config import APP_VERSION, TEMPLATES_DIR, AppConfig, BlurRegion, ChannelConfig, normalize_github_repo
+from app.config import (
+    APP_VERSION,
+    CONFIG_PATH,
+    DATA_DIR,
+    LIBRARY_CACHE_PATH,
+    LOG_PATH,
+    TEMPLATES_DIR,
+    AppConfig,
+    BlurRegion,
+    ChannelConfig,
+    get_file_logger,
+    normalize_github_repo,
+)
 from app.local_media_server import LocalMediaServer
 from app.updater import UpdateCheckWorker, UpdateDownloadWorker, launch_update_installer
 from app.recorder import (
@@ -41,13 +58,16 @@ from app.services import (
     GlobalHotkeyMonitor,
     ResourceMonitorWorker,
     ResourceSnapshot,
+    TelegramBotWorker,
     cleanup_old_recordings,
     send_notification_async,
+    send_telegram_reply_async,
     set_windows_autostart,
 )
 from app.tools import (
     EXPORT_PRESETS,
     detect_available_encoders,
+    detect_banner_intervals,
     extract_frame_from_file,
     get_ffmpeg_path,
     get_streamlink_path,
@@ -162,7 +182,7 @@ class _StartupWorker(QThread):
 
 
 class _LibraryScanWorker(QThread):
-    ready = Signal(list)
+    ready = Signal(list, dict)  # items, analytics_stats
 
     def __init__(self, root: Path, parent=None):
         super().__init__(parent)
@@ -171,30 +191,174 @@ class _LibraryScanWorker(QThread):
     def run(self) -> None:
         exts = {".mp4", ".mkv", ".ts", ".flv", ".mov"}
         items = []
+        cache: Dict[str, dict] = {}
+        try:
+            if LIBRARY_CACHE_PATH.exists():
+                cache = json.loads(LIBRARY_CACHE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            cache = {}
+
+        total_bytes = 0
+        folder_sizes: Dict[str, int] = {}
+        redundant_raw_cnt = 0
+        redundant_raw_bytes = 0
+        probed_now = 0
+        cache_dirty = False
+
         if self.root.exists():
             files = [
                 p for p in self.root.rglob("*")
                 if p.is_file() and p.suffix.lower() in exts and not p.name.startswith(".")
             ]
             files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+            for p in files:
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                total_bytes += st.st_size
+                folder_sizes[p.parent.name] = folder_sizes.get(p.parent.name, 0) + st.st_size
+                if p.stem.lower().endswith("_raw"):
+                    blurred = p.with_name(f"{p.stem[:-4]}_blurred{p.suffix}")
+                    if blurred.exists() and blurred.stat().st_size > 100_000:
+                        redundant_raw_cnt += 1
+                        redundant_raw_bytes += st.st_size
+
             for p in files[:150]:
                 try:
                     st = p.stat()
                 except OSError:
                     continue
+                ckey = f"{p}:{int(st.st_mtime)}"
+                cached = cache.get(ckey)
+                if not cached and probed_now < 25:
+                    info = probe_video(str(p))
+                    cached = {
+                        "duration": info.get("duration", 0.0),
+                        "width": int(info.get("width", 0)),
+                        "height": int(info.get("height", 0)),
+                    }
+                    cache[ckey] = cached
+                    probed_now += 1
+                    cache_dirty = True
+
+                dur = float((cached or {}).get("duration", 0.0))
+                h_px = int((cached or {}).get("height", 0))
+                res_str = f"{h_px}p" if h_px >= 240 else ""
+
+                meta_game, meta_title = "", ""
+                meta_f = p.with_suffix(".meta.json")
+                if meta_f.exists():
+                    try:
+                        md = json.loads(meta_f.read_text(encoding="utf-8"))
+                        meta_game = str(md.get("game") or "")
+                        meta_title = str(md.get("title") or "")
+                    except Exception:
+                        pass
+
+                markers = []
+                mk_f = p.with_suffix(".markers.json")
+                if mk_f.exists():
+                    try:
+                        markers = json.loads(mk_f.read_text(encoding="utf-8"))[:40]
+                    except Exception:
+                        pass
+
                 items.append({
                     "path": str(p),
                     "name": p.name,
                     "folder": p.parent.name,
                     "size_bytes": st.st_size,
                     "size_str": format_bytes(st.st_size),
+                    "duration_sec": dur,
+                    "duration_str": format_duration(dur) if dur > 0 else "",
+                    "resolution": res_str,
+                    "game": meta_game,
+                    "title": meta_title,
+                    "markers": markers,
                     "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%d.%m.%Y %H:%M"),
                     "is_blurred": "_blurred" in p.stem.lower(),
                     "has_chat": p.with_suffix(".chat.json").exists(),
                     "has_chat_ass": p.with_suffix(".chat.ass").exists(),
-                    "has_markers": p.with_suffix(".markers.json").exists(),
+                    "has_markers": mk_f.exists(),
                 })
-        self.ready.emit(items)
+
+        if cache_dirty:
+            try:
+                # Cap cache size to 1000 entries
+                if len(cache) > 1000:
+                    keys = list(cache.keys())[-800:]
+                    cache = {k: cache[k] for k in keys}
+                LIBRARY_CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+
+        top_folders = [
+            {"name": k, "size_str": format_bytes(v), "size_bytes": v}
+            for k, v in sorted(folder_sizes.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        ]
+        stats = {
+            "total_files": len(items),
+            "total_size_str": format_bytes(total_bytes),
+            "redundant_raw_count": redundant_raw_cnt,
+            "redundant_raw_size_str": format_bytes(redundant_raw_bytes),
+            "top_folders": top_folders,
+        }
+        self.ready.emit(items, stats)
+
+
+class _VodChatWorker(QThread):
+    ready = Signal(bool, str, str, int)  # ok, json_path, msg, count
+
+    def __init__(self, vod_url: str, base_path: str, cfg: AppConfig, parent=None):
+        super().__init__(parent)
+        self.vod_url = vod_url
+        self.base_path = base_path
+        self.cfg = cfg
+
+    def run(self) -> None:
+        ok, jpath, msg, cnt = fetch_twitch_vod_chat(
+            self.vod_url,
+            self.base_path,
+            oauth_token=self.cfg.twitch_oauth_token,
+            proxy_url=self.cfg.proxy_url,
+            chat_position=self.cfg.chat_position,
+            chat_font_size=self.cfg.chat_font_size,
+            chat_hide_bots=self.cfg.chat_hide_bots,
+        )
+        self.ready.emit(ok, jpath, msg, cnt)
+
+
+class _YtMetaWorker(QThread):
+    ready = Signal(bool, dict)
+
+    def __init__(self, video_path: str, cfg: AppConfig, parent=None):
+        super().__init__(parent)
+        self.video_path = video_path
+        self.cfg = cfg
+
+    def run(self) -> None:
+        ok, data = generate_youtube_metadata(
+            self.video_path,
+            llm_api_url=self.cfg.llm_api_url,
+            llm_api_key=self.cfg.llm_api_key,
+            llm_model=self.cfg.llm_model,
+            proxy_url=self.cfg.proxy_url,
+        )
+        self.ready.emit(ok, data)
+
+
+class _BannerTestWorker(QThread):
+    ready = Signal(list, str)  # intervals, label
+
+    def __init__(self, video_path: str, region: BlurRegion, parent=None):
+        super().__init__(parent)
+        self.video_path = video_path
+        self.region = region
+
+    def run(self) -> None:
+        ivs = detect_banner_intervals(self.video_path, self.region, sample_fps=0.5)
+        self.ready.emit(ivs, self.region.label)
 
 
 class AppBridge(QObject):
@@ -225,11 +389,15 @@ class AppBridge(QObject):
         self.pending_blur_queue: Deque[dict] = deque()
         self.studio_workers: Dict[str, QThread] = {}
         self.logs: Deque[str] = deque(maxlen=500)
+        self._file_logger = get_file_logger()
         self._disk_warned = False
+        self._disk_free_gb = 999.0
+        self._active_game = ""
 
         self._monitor_worker: Optional[ChannelMonitorWorker] = None
         self._thumb_worker: Optional[_ThumbWorker] = None
         self._lib_worker: Optional[_LibraryScanWorker] = None
+        self._tg_bot: Optional[TelegramBotWorker] = None
         self._update_check_worker: Optional[UpdateCheckWorker] = None
         self._update_dl_worker: Optional[UpdateDownloadWorker] = None
         self._update_state: dict = {
@@ -251,14 +419,21 @@ class AppBridge(QObject):
         self.queue_timer.timeout.connect(lambda: self._pump_blur_queue(force=False))
         self.queue_timer.start(30_000)
 
-        # PC Resource Monitor (#35)
-        self._res_monitor = ResourceMonitorWorker(lambda: self.config.output_dir, self)
+        # PC Resource Monitor (#35) + Game Mode (#43)
+        self._res_monitor = ResourceMonitorWorker(
+            lambda: self.config.output_dir,
+            game_cfg_fn=lambda: (self.config.game_mode_enabled, self.config.game_processes),
+            parent=self,
+        )
         self._res_monitor.stats_ready.connect(self._on_resource_stats)
         self._res_monitor.start()
 
         # Global F9 Hotkey (#19)
         self._hotkey = GlobalHotkeyMonitor(self.config.marker_hotkey, self)
         self._hotkey.triggered.connect(self._on_global_marker)
+
+        # Interactive Telegram Bot (#41)
+        self._sync_telegram_bot()
 
         # Probe hardware encoders & run optional startup cleanup asynchronously
         self._startup_worker = _StartupWorker(
@@ -335,7 +510,21 @@ class AppBridge(QObject):
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
         self.logs.append(line)
+        try:
+            self._file_logger.info(msg)
+        except Exception:
+            pass
         self._emit("log", {"line": line})
+
+    def handleNativeFileDrop(self, paths: List[str]) -> None:
+        """Called by DropWebEngineView when files are dropped from Finder/Explorer (#49)."""
+        clean = []
+        for p in paths:
+            if p and os.path.isfile(p):
+                self.allow_media_file(p)
+                clean.append(p)
+        if clean:
+            self._emit("files_dropped", clean)
 
     def _serialize_channels(self) -> list:
         out = []
@@ -565,10 +754,16 @@ class AppBridge(QObject):
         ch = self.config.get_channel(key)
         if not ch:
             return
+        if self.config.hard_disk_guard and self._disk_free_gb < self.config.min_free_gb:
+            self._log(f"[Диск] Запись {ch.username} заблокирована: свободно {self._disk_free_gb:.1f} ГБ < {self.config.min_free_gb} ГБ")
+            self._toast("Недостаточно места на диске", f"Свободно {self._disk_free_gb:.1f} ГБ (лимит {self.config.min_free_gb} ГБ)", "error")
+            return
         self.manually_stopped.discard(key)
         self.live_telemetry[key] = {"dur": "00:00:00", "size": "0 КБ", "speed": "1.0x", "state": "Подключение..."}
 
-        w = LiveRecorderWorker(deepcopy(ch), deepcopy(self.config), self)
+        st = self.statuses.get(key)
+        s_meta = asdict(st) if st else {}
+        w = LiveRecorderWorker(deepcopy(ch), deepcopy(self.config), stream_meta=s_meta, parent=self)
         w.progress_updated.connect(self._on_rec_progress)
         w.status_changed.connect(self._on_rec_status)
         w.log_message.connect(self._log)
@@ -578,7 +773,6 @@ class AppBridge(QObject):
         self._push_channels()
 
         if self.config.notify_on_live:
-            st = self.statuses.get(key)
             info = f"Канал: {ch.username} ({ch.platform})\nКачество: {ch.quality}"
             if st and st.title:
                 info += f"\nСтрим: {st.title[:100]}"
@@ -823,6 +1017,50 @@ class AppBridge(QObject):
             force_now=bool(p.get("force_now", True)),
         )
 
+    @Slot(str)
+    def batchEnqueueBlur(self, payload_json: str) -> None:
+        """Enqueue multiple video files into the GPU blur queue with one preset (#15)."""
+        p = json.loads(payload_json)
+        paths = [f for f in (p.get("input_paths") or []) if f and os.path.isfile(f)]
+        if not paths:
+            self._toast("Пакетный блюр", "Выберите хотя бы один видеофайл", "error")
+            return
+        regions = [AppConfig._parse_region(r) for r in (p.get("regions") or [])]
+        if not regions and p.get("preset_channel_key"):
+            ch = self.config.get_channel(p["preset_channel_key"])
+            if ch:
+                regions = deepcopy(ch.blur_regions)
+        if not regions:
+            self._toast("Нет зон блюра", "Выберите пресет или задайте зоны блюра", "error")
+            return
+        for fp in paths:
+            self.allow_media_file(fp)
+            self._enqueue_blur_job(
+                fp,
+                regions,
+                delete_original=bool(p.get("delete_original", False)),
+                normalize_audio=bool(p.get("normalize_audio", False)),
+                force_now=bool(p.get("force_now", True)),
+            )
+        self._toast("Пакетный блюр", f"Добавлено в очередь GPU: {len(paths)} файлов", "success")
+
+    @Slot(str, str)
+    def testBannerDetect(self, video_path: str, region_json: str) -> None:
+        """Preview OpenCV banner auto-detection intervals directly inside Blur Studio (#13)."""
+        if not video_path or not os.path.exists(video_path):
+            self._toast("Проверка детекции", "Откройте видеофайл в Студии блюра", "error")
+            return
+        r = AppConfig._parse_region(json.loads(region_json))
+        if not r.template_path or not os.path.exists(r.template_path):
+            self._toast("Нет образца", "Сначала нажмите «Запомнить образец баннера»", "error")
+            return
+        self._toast("Тест AI-детектора", f"Сканируем видео для «{r.label}»...", "info")
+        w = _BannerTestWorker(video_path, r, self)
+        w.ready.connect(lambda ivs, lbl: self._emit("banner_test", {"intervals": ivs, "label": lbl}))
+        w.finished.connect(lambda wk=w: self._cleanup_aux(wk))
+        self._aux_workers.append(w)
+        w.start()
+
     def _enqueue_blur_job(
         self,
         input_path: str,
@@ -837,11 +1075,16 @@ class AppBridge(QObject):
         sub = f"Зон: {len(regions)}" + (f" (AI: {ai_cnt})" if ai_cnt else "") + f" · {enc}"
         if normalize_audio:
             sub += " · EBU R128"
-        deferred = self.config.night_render_enabled and not self.config.is_night_render_window() and not force_now
+        deferred_night = self.config.night_render_enabled and not self.config.is_night_render_window() and not force_now
+        deferred_game = self.config.game_mode_enabled and bool(self._active_game) and not force_now
+        status_txt = (
+            f"Пауза (Игра: {self._active_game})" if deferred_game
+            else (f"Ночной рендер ({self.config.night_render_start})" if deferred_night else "В очереди GPU...")
+        )
         self.jobs[jid] = {
             "id": jid, "category": "blur", "title": Path(input_path).name, "subtitle": sub,
             "progress": 0.0,
-            "status": f"Ночной рендер ({self.config.night_render_start})" if deferred else "В очереди GPU...",
+            "status": status_txt,
             "state": "queued", "output_path": "",
         }
         self._push_job(jid)
@@ -860,6 +1103,8 @@ class AppBridge(QObject):
         if not self.pending_blur_queue:
             return
         if not force and self.config.night_render_enabled and not self.config.is_night_render_window():
+            return
+        if not force and self.config.game_mode_enabled and self._active_game:
             return
         while self.pending_blur_queue and len(self.blur_workers) < self.config.max_concurrent_blurs:
             job = self.pending_blur_queue.popleft()
@@ -915,15 +1160,40 @@ class AppBridge(QObject):
             if w and hasattr(w, "request_stop"):
                 w.request_stop()
 
-    # ------------------------------------------------------------------ Library (#28)
+    # ------------------------------------------------------------------ Library (#28, #47, #51)
     @Slot()
     def scanLibrary(self) -> None:
         if self._lib_worker and self._lib_worker.isRunning():
             return
         root = self.config.ensure_output_dir()
         self._lib_worker = _LibraryScanWorker(root, self)
-        self._lib_worker.ready.connect(lambda items: self._emit("library", items))
+        self._lib_worker.ready.connect(lambda items, stats: self._emit("library", {"items": items, "stats": stats}))
         self._lib_worker.start()
+
+    @Slot()
+    def cleanRedundantRawFiles(self) -> None:
+        """Delete *_raw files that already have a valid *_blurred counterpart (>100KB) (#51)."""
+        root = self.config.ensure_output_dir()
+        exts = {".mp4", ".mkv", ".ts", ".flv", ".mov"}
+        deleted = 0
+        freed = 0
+        if root.exists():
+            for p in root.rglob("*"):
+                if p.is_file() and p.suffix.lower() in exts and p.stem.lower().endswith("_raw"):
+                    blurred = p.with_name(f"{p.stem[:-4]}_blurred{p.suffix}")
+                    try:
+                        if blurred.exists() and blurred.stat().st_size > 100_000:
+                            freed += p.stat().st_size
+                            p.unlink()
+                            deleted += 1
+                    except Exception:
+                        pass
+        if deleted > 0:
+            self._log(f"[Очистка _raw] Удалено {deleted} исходников, освобождено {format_bytes(freed)}")
+            self._toast("Очистка исходников", f"Удалено {deleted} _raw файлов ({format_bytes(freed)})", "success")
+            self.scanLibrary()
+        else:
+            self._toast("Очистка исходников", "Лишних _raw файлов с готовым блюром не найдено", "info")
 
     @Slot(str, result=bool)
     def deleteRecordingFile(self, path: str) -> bool:
@@ -939,6 +1209,7 @@ class AppBridge(QObject):
                 target.with_suffix(".chat.json"),
                 target.with_suffix(".chat.ass"),
                 target.with_suffix(".markers.json"),
+                target.with_suffix(".meta.json"),
                 target.with_suffix(".edl"),
             ):
                 if side.exists():
@@ -952,7 +1223,7 @@ class AppBridge(QObject):
             pass
         return False
 
-    # ------------------------------------------------------------------ Studio & AI (#6, #8, #16-#18, #20-#25)
+    # ------------------------------------------------------------------ Studio & AI (#6, #8, #16-#26, #30, #33)
     @Slot(str, str)
     def analyzeHighlights(self, mode: str, target_path: str) -> None:
         if not target_path or not os.path.exists(target_path):
@@ -960,6 +1231,63 @@ class AppBridge(QObject):
             return
         w = _HighlightsWorker(mode, target_path, self)
         w.ready.connect(lambda m, hm, hl: self._emit("highlights", {"mode": m, "heatmap": hm, "highlights": hl}))
+        w.finished.connect(lambda wk=w: self._cleanup_aux(wk))
+        self._aux_workers.append(w)
+        w.start()
+
+    @Slot(str, str)
+    def downloadVodChat(self, vod_url: str, video_path: str) -> None:
+        """Download past Twitch VOD chat via GQL into .chat.json + .chat.ass (#33)."""
+        if not vod_url.strip():
+            self._toast("Чат VOD", "Укажите ссылку или ID Twitch VOD", "error")
+            return
+        base = video_path.strip() if video_path.strip() else str(self.config.ensure_output_dir() / "VODs" / f"vod_chat_{uuid.uuid4().hex[:6]}.mp4")
+        Path(base).parent.mkdir(parents=True, exist_ok=True)
+        self._toast("Загрузка чата VOD", "Скачиваем сообщения из Twitch GQL...", "info")
+        w = _VodChatWorker(vod_url, base, deepcopy(self.config), self)
+
+        def _done(ok: bool, jpath: str, msg: str, cnt: int) -> None:
+            if ok and jpath:
+                self.allow_media_file(jpath)
+                self._log(f"[Чат VOD] {msg}")
+                self._toast("Чат VOD загружен", msg, "success")
+                self._emit("vod_chat_ready", {"ok": True, "json_path": jpath, "count": cnt, "message": msg})
+            else:
+                self._toast("Чат VOD", msg, "error")
+                self._emit("vod_chat_ready", {"ok": False, "json_path": "", "count": 0, "message": msg})
+
+        w.ready.connect(_done)
+        w.finished.connect(lambda wk=w: self._cleanup_aux(wk))
+        self._aux_workers.append(w)
+        w.start()
+
+    @Slot(str, str)
+    def exportHighlightsEdl(self, video_path: str, highlights_json: str) -> None:
+        """Export detected highlights to Premiere Pro / DaVinci Resolve .edl (#19)."""
+        if not video_path:
+            self._toast("Экспорт EDL", "Сначала выберите видеофайл", "error")
+            return
+        try:
+            hls = json.loads(highlights_json or "[]")
+            markers = [{"t": float(h.get("timestamp_sec", 0)), "note": str(h.get("reason", "Хайлайт"))} for h in hls]
+            if not markers:
+                self._toast("Экспорт EDL", "Нет найденных хайлайтов для экспорта", "error")
+                return
+            _, edl_path = save_markers_and_edl(video_path, markers)
+            self._log(f"[Экспорт EDL] Сохранено {len(markers)} маркеров -> {Path(edl_path).name}")
+            self._toast("EDL экспортирован", f"{Path(edl_path).name} (Premiere / DaVinci)", "success")
+        except Exception as exc:
+            self._toast("Ошибка EDL", str(exc), "error")
+
+    @Slot(str)
+    def generateYouTubeMeta(self, video_path: str) -> None:
+        """Generate YouTube titles, description, tags, and chapters via LLM or local heuristics (#26)."""
+        if not video_path or not os.path.exists(video_path):
+            self._toast("AI YouTube", "Выберите видеофайл", "error")
+            return
+        self._toast("AI YouTube", "Генерируем заголовки, описание и таймкоды...", "info")
+        w = _YtMetaWorker(video_path, deepcopy(self.config), self)
+        w.ready.connect(lambda ok, data: self._emit("yt_meta", {"ok": ok, **data}))
         w.finished.connect(lambda wk=w: self._cleanup_aux(wk))
         self._aux_workers.append(w)
         w.start()
@@ -994,6 +1322,7 @@ class AppBridge(QObject):
                 censor_beep=bool(p.get("censor_beep", True)),
                 encoder=resolve_encoder(self.config.encoder),
                 quality=self.config.video_quality,
+                initial_prompt=p.get("whisper_prompt", self.config.whisper_prompt),
                 parent=self,
             )
             w.progress_updated.connect(self._on_job_progress)
@@ -1049,12 +1378,15 @@ class AppBridge(QObject):
         for k in (
             "output_dir", "check_interval_sec", "encoder", "video_quality", "container",
             "vod_concurrent_fragments", "twitch_oauth_token", "proxy_url",
-            "min_free_gb", "auto_cleanup_old", "max_age_days", "minimize_to_tray",
+            "min_free_gb", "hard_disk_guard", "auto_cleanup_old", "max_age_days", "minimize_to_tray",
             "start_with_windows", "marker_hotkey", "telegram_bot_token", "telegram_chat_id",
-            "discord_webhook_url", "notify_on_live", "notify_on_finish", "notify_on_blur",
+            "telegram_bot_enabled", "discord_webhook_url", "notify_on_live", "notify_on_finish", "notify_on_blur",
             "max_concurrent_blurs", "night_render_enabled", "night_render_start",
-            "night_render_end", "normalize_audio_default", "whisper_model", "banned_words",
-            "github_repo", "auto_check_updates",
+            "night_render_end", "normalize_audio_default", "low_priority_render",
+            "game_mode_enabled", "game_processes", "whisper_model", "whisper_prompt", "banned_words",
+            "llm_api_url", "llm_api_key", "llm_model",
+            "chat_position", "chat_font_size", "chat_hide_bots", "watermark_path",
+            "theme", "compact_cards", "github_repo", "auto_check_updates",
         ):
             if k in d:
                 val = normalize_github_repo(str(d[k])) if k == "github_repo" else d[k]
@@ -1065,9 +1397,173 @@ class AppBridge(QObject):
         self._hotkey.set_key(self.config.marker_hotkey)
         if self.config.auto_monitor_enabled:
             self.monitor_timer.start(self.config.check_interval_sec * 1000)
+        self._sync_telegram_bot()
         self._emit("config", asdict(self.config))
         self._emit("diagnostics", self._build_diagnostics())
         self._toast("Настройки сохранены", "Все параметры применены", "success")
+
+    # ------------------------------------------------------------------ #35 Profile Backup & #55 Logs/Diagnostics
+    @Slot()
+    def exportProfileZip(self) -> None:
+        default_name = str(DATA_DIR / f"TwitchRecorderPro_Profile_{datetime.now().strftime('%Y%m%d')}.zip")
+        dest, _ = QFileDialog.getSaveFileName(self._win, "Экспорт профиля (каналы + блюр + шаблоны)", default_name, "ZIP архив (*.zip)")
+        if not dest:
+            return
+        try:
+            self.config.save()
+            with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
+                if CONFIG_PATH.exists():
+                    zf.write(CONFIG_PATH, "config.json")
+                if TEMPLATES_DIR.exists():
+                    for f in TEMPLATES_DIR.rglob("*"):
+                        if f.is_file():
+                            zf.write(f, f"templates/{f.relative_to(TEMPLATES_DIR)}")
+            self._log(f"[Профиль] Экспортирован в {dest}")
+            self._toast("Профиль экспортирован", Path(dest).name, "success")
+        except Exception as exc:
+            self._toast("Ошибка экспорта профиля", str(exc), "error")
+
+    @Slot()
+    def importProfileZip(self) -> None:
+        src, _ = QFileDialog.getOpenFileName(self._win, "Импорт профиля (.zip)", str(DATA_DIR), "ZIP архив (*.zip)")
+        if not src:
+            return
+        try:
+            with zipfile.ZipFile(src, "r") as zf:
+                names = zf.namelist()
+                if "config.json" not in names:
+                    self._toast("Ошибка импорта", "В архиве нет config.json", "error")
+                    return
+                CONFIG_PATH.write_bytes(zf.read("config.json"))
+                TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+                for name in names:
+                    if name.startswith("templates/") and not name.endswith("/"):
+                        rel = Path(name[len("templates/") :]).name
+                        if rel:
+                            (TEMPLATES_DIR / rel).write_bytes(zf.read(name))
+            self.config = AppConfig.load()
+            self._register_configured_media_files()
+            self._sync_telegram_bot()
+            self._emit("config", asdict(self.config))
+            self._push_channels()
+            self._log(f"[Профиль] Импортирован из {Path(src).name}")
+            self._toast("Профиль импортирован", "Каналы, настройки и шаблоны восстановлены", "success")
+        except Exception as exc:
+            self._toast("Ошибка импорта профиля", str(exc), "error")
+
+    @Slot()
+    def openLogFile(self) -> None:
+        self.openInExplorer(str(LOG_PATH) if LOG_PATH.exists() else str(DATA_DIR))
+
+    # ------------------------------------------------------------------ #41 Interactive Telegram Bot
+    def _sync_telegram_bot(self) -> None:
+        should_run = bool(
+            self.config.telegram_bot_enabled
+            and self.config.telegram_bot_token.strip()
+            and self.config.telegram_chat_id.strip()
+        )
+        if self._tg_bot and self._tg_bot.isRunning():
+            if (
+                should_run
+                and self._tg_bot.token == self.config.telegram_bot_token.strip()
+                and self._tg_bot.allowed_chat_id == self.config.telegram_chat_id.strip()
+            ):
+                return
+            self._tg_bot.stop()
+            self._tg_bot.wait(1200)
+            self._tg_bot = None
+        if should_run:
+            self._tg_bot = TelegramBotWorker(
+                self.config.telegram_bot_token,
+                self.config.telegram_chat_id,
+                self.config.proxy_url,
+                self,
+            )
+            self._tg_bot.command_received.connect(self._on_telegram_command)
+            self._tg_bot.log_message.connect(self._log)
+            self._tg_bot.start()
+
+    def _tg_reply(self, text: str, photo_path: Optional[str] = None) -> None:
+        send_telegram_reply_async(
+            self.config.telegram_bot_token,
+            self.config.telegram_chat_id,
+            text,
+            photo_path=photo_path,
+            proxy_url=self.config.proxy_url,
+        )
+
+    def _on_telegram_command(self, cmd: str, arg: str) -> None:
+        self._log(f"[Telegram Bot] Команда: {cmd} {arg}".strip())
+        if cmd in ("/start", "/help"):
+            self._tg_reply(
+                "Twitch Recorder Pro — удалённое управление:\n"
+                "/status — статус эфиров, записей и диска\n"
+                "/rec <ник> — начать запись канала\n"
+                "/stop <ник> — остановить запись канала\n"
+                "/stopall — остановить все записи\n"
+                "/marker [текст] — поставить маркер хайлайта\n"
+                "/vod <ссылка> — скачать VOD\n"
+                "/snap <ник> — прислать скриншот эфира"
+            )
+        elif cmd == "/status":
+            live_chs = [c.username for c in self.config.channels if (self.statuses.get(c.key) and self.statuses[c.key].is_live)]
+            rec_chs = [w.channel.username for w in self.live_recorders.values()]
+            gm = f"\nИгровой режим: активен ({self._active_game})" if self._active_game else ""
+            self._tg_reply(
+                f"Статус Twitch Recorder Pro v{APP_VERSION}\n"
+                f"В эфире ({len(live_chs)}): {', '.join(live_chs) or 'нет'}\n"
+                f"Пишутся ({len(rec_chs)}): {', '.join(rec_chs) or 'нет'}\n"
+                f"Очередь блюра: {len(self.pending_blur_queue)} (активно: {len(self.blur_workers)})\n"
+                f"Свободно на диске: {self._disk_free_gb:.1f} ГБ{gm}"
+            )
+        elif cmd == "/rec" and arg:
+            ch = self.config.get_channel(arg)
+            if not ch:
+                self._tg_reply(f"Канал «{arg}» не найден в списке.")
+            else:
+                self.startRecording(ch.key)
+                self._tg_reply(f"Запуск записи канала {ch.username}...")
+        elif cmd == "/stop" and arg:
+            ch = self.config.get_channel(arg)
+            if not ch or ch.key not in self.live_recorders:
+                self._tg_reply(f"Запись канала «{arg}» сейчас не идёт.")
+            else:
+                self.stopRecording(ch.key)
+                self._tg_reply(f"Остановка записи {ch.username}...")
+        elif cmd == "/stopall":
+            cnt = len(self.live_recorders)
+            self.stopAllRecordings()
+            self._tg_reply(f"Остановлено записей: {cnt}")
+        elif cmd == "/marker":
+            if not self.live_recorders:
+                self._tg_reply("Нет активных записей для маркера.")
+            else:
+                note = arg or "Telegram маркер"
+                lines = []
+                for w in self.live_recorders.values():
+                    t = w.add_marker(note)
+                    lines.append(f"{w.channel.username}: {format_duration(t)}")
+                self._tg_reply("Маркер поставлен:\n" + "\n".join(lines))
+        elif cmd == "/vod" and arg:
+            self.startVodDownload(json.dumps({"url": arg, "quality": "best"}))
+            self._tg_reply(f"Загрузка VOD поставлена в очередь:\n{arg}")
+        elif cmd == "/snap" and arg:
+            ch = self.config.get_channel(arg) or ChannelConfig(username=arg.strip().lower(), platform="twitch")
+            out_jpg = os.path.join(tempfile.gettempdir(), f"tr_tgsnap_{uuid.uuid4().hex[:6]}.jpg")
+            w = _SnapWorker(uuid.uuid4().hex[:6], "live", ch, 0.0, ch.quality, self.config.proxy_url, self)
+
+            def _send_snap(_rid: str, ok: bool, path: str, msg: str) -> None:
+                if ok and path and os.path.exists(path):
+                    self._tg_reply(f"Кадр: {ch.username}", photo_path=path)
+                else:
+                    self._tg_reply(f"Не удалось снять кадр {ch.username}: {msg}")
+
+            w.ready.connect(_send_snap)
+            w.finished.connect(lambda wk=w: self._cleanup_aux(wk))
+            self._aux_workers.append(w)
+            w.start()
+        else:
+            self._tg_reply("Неизвестная команда. Отправьте /help")
 
     # ------------------------------------------------------------------ Cloud Updates (GitHub Releases)
     def _push_update_state(self) -> None:
@@ -1149,7 +1645,10 @@ class AppBridge(QObject):
         self._update_state["downloaded_path"] = ""
         self._push_update_state()
 
-        self._update_dl_worker = UpdateDownloadWorker(asset_url, asset_name, self.config.proxy_url, self)
+        checksum_url = info.get("checksum_url") or ""
+        self._update_dl_worker = UpdateDownloadWorker(
+            asset_url, asset_name, self.config.proxy_url, checksum_url=checksum_url, parent=self
+        )
         self._update_dl_worker.progress_updated.connect(self._on_update_dl_progress)
         self._update_dl_worker.finished_download.connect(self._on_update_dl_finished)
         self._update_dl_worker.start()
@@ -1217,14 +1716,27 @@ class AppBridge(QObject):
     def clearLogs(self) -> None:
         self.logs.clear()
 
-    # ------------------------------------------------------------------ Resource Stats & Shutdown
+    # ------------------------------------------------------------------ Resource Stats, Game Mode, Hard Disk Guard & Shutdown
     def _on_resource_stats(self, snap: ResourceSnapshot) -> None:
+        self._disk_free_gb = float(snap.disk_free_gb or 0.0)
+        prev_game = self._active_game
+        self._active_game = snap.active_game or ""
+        if self._active_game and not prev_game:
+            self._log(f"[Игровой режим] Обнаружена игра ({self._active_game}) — очередь GPU-рендера на паузе.")
+        elif prev_game and not self._active_game:
+            self._log(f"[Игровой режим] Игра ({prev_game}) закрыта — возобновление очереди GPU.")
+            self._pump_blur_queue(force=False)
+
         self._emit("resources", asdict(snap))
         low_disk = snap.disk_free_gb < self.config.min_free_gb
         if low_disk and not self._disk_warned:
             self._disk_warned = True
             self._log(f"[Диск] ВНИМАНИЕ: осталось {snap.disk_free_gb:.1f} ГБ!")
             send_notification_async(self.config, "Мало места на диске!", f"Осталось {snap.disk_free_gb:.1f} ГБ")
+            if self.config.hard_disk_guard and self.live_recorders:
+                self._log("[Диск] Hard Disk Guard: аварийная остановка активных записей!")
+                self._toast("Hard Disk Guard", f"Записи остановлены — осталось {snap.disk_free_gb:.1f} ГБ", "error")
+                self.stopAllRecordings()
         elif not low_disk:
             self._disk_warned = False
 
@@ -1236,6 +1748,9 @@ class AppBridge(QObject):
         self.queue_timer.stop()
         self._res_monitor.stop()
         self._res_monitor.wait(1500)
+        if self._tg_bot and self._tg_bot.isRunning():
+            self._tg_bot.stop()
+            self._tg_bot.wait(1000)
         for pool in (self.live_recorders, self.vod_workers, self.blur_workers, self.studio_workers):
             for w in list(pool.values()):
                 if hasattr(w, "request_stop"):

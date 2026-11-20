@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -14,6 +15,7 @@ from PySide6.QtCore import QThread, Signal
 
 from app.chat_and_ai import TwitchChatRecorder, save_markers_and_edl
 from app.config import AppConfig, BlurRegion, ChannelConfig
+from app.services import low_priority_popen_kwargs
 from app.tools import (
     CREATE_NO_WINDOW,
     EXPORT_PRESETS,
@@ -130,11 +132,20 @@ class LiveRecorderWorker(QThread):
 
     _TIME_RE = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
     _SPEED_RE = re.compile(r"speed=\s*([\d.]+x)")
+    _FPS_RE = re.compile(r"fps=\s*([\d.]+)")
+    _BITRATE_RE = re.compile(r"bitrate=\s*([\d.]+\s*[kM]bits/s)")
 
-    def __init__(self, channel: ChannelConfig, app_config: AppConfig, parent=None):
+    def __init__(
+        self,
+        channel: ChannelConfig,
+        app_config: AppConfig,
+        stream_meta: Optional[dict] = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.channel = channel
         self.app_config = app_config
+        self.stream_meta = dict(stream_meta or {})
         self._stop_requested = False
         self._sl_proc: Optional[subprocess.Popen] = None
         self._ff_proc: Optional[subprocess.Popen] = None
@@ -179,10 +190,16 @@ class LiveRecorderWorker(QThread):
         needs_post_blur = self.channel.blur_mode == "postprocess" and has_regions
         suffix = "_blurred" if use_realtime_blur else ("_raw" if needs_post_blur else "")
 
-        # Start parallel Twitch chat recorder (#15)
+        # Start parallel Twitch chat recorder (#15, #32)
         first_base = out_dir / f"{session_ts}_{sanitize_filename(uname)}{suffix}.{ext}"
         if self.channel.platform == "twitch" and self.channel.record_chat:
-            self._chat_rec = TwitchChatRecorder(uname, str(first_base))
+            self._chat_rec = TwitchChatRecorder(
+                uname,
+                str(first_base),
+                chat_position=self.app_config.chat_position,
+                chat_font_size=self.app_config.chat_font_size,
+                chat_hide_bots=self.app_config.chat_hide_bots,
+            )
             self._chat_rec.start()
             self.log_message.emit(f"[{uname}] Параллельная запись чата Twitch запущена.")
 
@@ -218,6 +235,22 @@ class LiveRecorderWorker(QThread):
                 break
 
             if self.channel.auto_reconnect and consecutive_fails <= max_reconnect_fails:
+                # #3 Smart end-of-stream check: avoid 40s reconnect loop if streamer actually went offline
+                if ok and self.channel.platform == "twitch":
+                    try:
+                        chk = check_channels_status(
+                            [self.channel],
+                            timeout=6,
+                            oauth_token=self.app_config.twitch_oauth_token,
+                            proxy_url=self.app_config.proxy_url,
+                        )
+                        st_now = chk.get(self.channel.key)
+                        if st_now and not st_now.is_live and not st_now.error:
+                            self.log_message.emit(f"[{uname}] Стример завершил эфир — запись остановлена.")
+                            break
+                    except Exception:
+                        pass
+
                 wait_s = 6 if ok else 10
                 self.status_changed.emit(key, f"Переподключение ({consecutive_fails}/{max_reconnect_fails})...")
                 self.log_message.emit(f"[{uname}] Поток прервался. Попытка переподключения через {wait_s} сек...")
@@ -254,6 +287,26 @@ class LiveRecorderWorker(QThread):
             self.log_message.emit(
                 f"[{uname}] Сохранено {len(self._markers)} маркеров -> {Path(edl_m).name}"
             )
+
+        # Save session metadata (.meta.json #9)
+        if final_files:
+            try:
+                meta_payload = {
+                    "channel": uname,
+                    "platform": self.channel.platform,
+                    "title": self.stream_meta.get("title", ""),
+                    "game": self.stream_meta.get("game", ""),
+                    "viewers": self.stream_meta.get("viewers", 0),
+                    "started_at": session_ts,
+                    "duration_sec": round(max(0.0, time.time() - self._start_wall), 1),
+                    "markers_count": len(self._markers),
+                }
+                Path(final_files[0]).with_suffix(".meta.json").write_text(
+                    json.dumps(meta_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
 
         success = len(final_files) > 0
         self.finished_recording.emit(key, final_files, success, needs_post_blur)
@@ -376,10 +429,17 @@ class LiveRecorderWorker(QThread):
                                 dur_str = format_duration(int(tm.group(1)) * 3600 + int(tm.group(2)) * 60 + float(tm.group(3)))
                             sp = self._SPEED_RE.search(line)
                             speed_str = sp.group(1) if sp else "1.0x"
+                            fps_m = self._FPS_RE.search(line)
+                            br_m = self._BITRATE_RE.search(line)
+                            extras = [speed_str]
+                            if fps_m and float(fps_m.group(1)) > 0:
+                                extras.append(f"{int(round(float(fps_m.group(1))))}fps")
+                            if br_m:
+                                extras.append(br_m.group(1).replace("bits/s", "bps"))
                             # Sum size of current pass segment(s) only
                             cur_files = _match_pass_files()
                             total_sz = sum(p.stat().st_size for p in cur_files if p.exists())
-                            self.progress_updated.emit(key, dur_str, format_bytes(total_sz), speed_str)
+                            self.progress_updated.emit(key, dur_str, format_bytes(total_sz), " · ".join(extras))
                     else:
                         last_errs.append(line)
                         if len(last_errs) > 10:
@@ -761,7 +821,8 @@ class BlurPostProcessWorker(QThread):
         try:
             self._proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW,
+                text=True, encoding="utf-8", errors="replace",
+                **low_priority_popen_kwargs(self.app_config.low_priority_render),
             )
             err_drain = _start_pipe_drain(self._proc.stderr, err_lines)
             assert self._proc.stdout is not None
@@ -848,17 +909,60 @@ class StudioToolWorker(QThread):
             except Exception:
                 pass
 
-    def _run_ffmpeg_cancellable(self, cmd: List[str], timeout: int = 1800) -> Tuple[int, str]:
+    _TIME_RE = re.compile(r"out_time_us=(\d+)")
+    _SPEED_RE = re.compile(r"speed=\s*([\d.]+x)")
+
+    def _run_ffmpeg_with_progress(
+        self,
+        cmd: List[str],
+        total_dur: float,
+        label: str,
+        timeout: int = 1800,
+    ) -> Tuple[int, str]:
+        """Run FFmpeg with -progress pipe:1 so Studio tasks show real-time % and speed (#46)."""
+        # Inject -progress pipe:1 -nostats right after ffmpeg binary
+        full_cmd = [cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
+        err_lines: Deque[str] = deque(maxlen=40)
         self._proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW,
+            full_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **low_priority_popen_kwargs(self.app_config.low_priority_render),
         )
+        err_drain = _start_pipe_drain(self._proc.stderr, err_lines)
         try:
-            _, err = self._proc.communicate(timeout=timeout)
-            return self._proc.returncode or 0, err or ""
+            assert self._proc.stdout is not None
+            cur_us, cur_speed, last_emit = 0, "", 0.0
+            for raw in self._proc.stdout:
+                line = raw.strip()
+                mt = self._TIME_RE.match(line)
+                if mt:
+                    cur_us = int(mt.group(1))
+                ms = self._SPEED_RE.match(line)
+                if ms:
+                    cur_speed = ms.group(1)
+                if line in ("progress=continue", "progress=end"):
+                    now = time.time()
+                    if now - last_emit >= 0.4 or line == "progress=end":
+                        last_emit = now
+                        cur_sec = cur_us / 1_000_000.0
+                        pct = 100.0 if line == "progress=end" else (
+                            min(99.5, (cur_sec / total_dur) * 100.0) if total_dur > 0 else 25.0
+                        )
+                        sp_txt = f" · {cur_speed}" if cur_speed else ""
+                        self.progress_updated.emit(
+                            self.job_id, pct, f"{label}: {pct:.1f}%{sp_txt}"
+                        )
+            rc = self._proc.wait(timeout=timeout)
+            if err_drain:
+                err_drain.join(timeout=1.5)
+            return rc or 0, "\n".join(err_lines)
         except subprocess.TimeoutExpired:
             self._proc.kill()
-            self._proc.communicate()
+            self._proc.wait(timeout=3)
             return 1, "Таймаут FFmpeg"
         finally:
             self._proc = None
@@ -883,6 +987,85 @@ class StudioToolWorker(QThread):
                     quality=q,
                 )
                 self._emit_done(ok, res, "Обрезка готова")
+
+            elif self.action == "multi_cut":
+                # #18 Multi-Cut Timeline Compilation from user-selected segments
+                inp = self.params["input_path"]
+                out = self.params["output_path"]
+                segs = self.params.get("segments") or []
+                accurate = bool(self.params.get("accurate", True))
+                if not segs:
+                    self._emit_done(False, "Добавьте хотя бы 1 отрезок", "")
+                    return
+                parts_dir = Path(out).parent / f".tmp_mc_{self.job_id}"
+                parts_dir.mkdir(parents=True, exist_ok=True)
+                seg_files: List[str] = []
+                try:
+                    for idx, seg in enumerate(segs):
+                        if self._stop_requested:
+                            self._emit_done(False, "Отменено", "")
+                            return
+                        s, e = float(seg[0]), float(seg[1])
+                        if e <= s:
+                            continue
+                        pct = 10.0 + (idx / max(1, len(segs))) * 75.0
+                        self.progress_updated.emit(self.job_id, pct, f"Отрезок {idx + 1}/{len(segs)}...")
+                        sf = str(parts_dir / f"mc_{idx:04d}.mp4")
+                        ok_t, _ = trim_video_fast(inp, s, e, sf, accurate_reencode=accurate, encoder=enc, quality=q)
+                        if ok_t:
+                            seg_files.append(sf)
+                    if self._stop_requested:
+                        self._emit_done(False, "Отменено", "")
+                        return
+                    self.progress_updated.emit(self.job_id, 90.0, f"Склейка {len(seg_files)} отрезков...")
+                    if len(seg_files) == 1:
+                        os.replace(seg_files[0], out)
+                        ok, res = True, out
+                    elif len(seg_files) > 1:
+                        ok, res = concat_videos(seg_files, out, normalize_clips=False)
+                    else:
+                        ok, res = False, "Не удалось вырезать отрезки"
+                finally:
+                    for sf in seg_files:
+                        if os.path.exists(sf):
+                            try:
+                                os.remove(sf)
+                            except Exception:
+                                pass
+                    try:
+                        parts_dir.rmdir()
+                    except Exception:
+                        pass
+                self._emit_done(ok, res, f"Нарезка готова ({len(segs)} отрезков)")
+
+            elif self.action == "batch_highlights":
+                # #25 Batch-cut all detected highlight timestamps into separate clips
+                inp = self.params["input_path"]
+                timestamps = self.params.get("timestamps") or []
+                pad = float(self.params.get("pad_sec", 20.0))
+                if not timestamps:
+                    self._emit_done(False, "Нет хайлайтов для нарезки", "")
+                    return
+                p_in = Path(inp)
+                hl_dir = p_in.parent / f"{p_in.stem}_highlights"
+                hl_dir.mkdir(parents=True, exist_ok=True)
+                created: List[str] = []
+                for idx, t in enumerate(timestamps):
+                    if self._stop_requested:
+                        self._emit_done(False, "Отменено", "")
+                        return
+                    ts = float(t)
+                    s, e = max(0.0, ts - pad), ts + pad
+                    pct = (idx / max(1, len(timestamps))) * 95.0
+                    self.progress_updated.emit(self.job_id, pct, f"Хайлайт {idx + 1}/{len(timestamps)}...")
+                    out_clip = str(hl_dir / f"hl_{idx + 1:02d}_{int(ts)}s{p_in.suffix}")
+                    ok_t, _ = trim_video_fast(inp, s, e, out_clip, accurate_reencode=False)
+                    if ok_t:
+                        created.append(out_clip)
+                if created:
+                    self._emit_done(True, created[0], f"Нарезано {len(created)} хайлайтов")
+                else:
+                    self._emit_done(False, "Не удалось нарезать хайлайты", "")
 
             elif self.action == "concat":
                 self.progress_updated.emit(self.job_id, 20.0, "Склейка файлов...")
@@ -915,7 +1098,7 @@ class StudioToolWorker(QThread):
                 self.log_message.emit(f"[Авто-резка] Найдено активных сегментов: {len(keeps)}")
                 parts_dir = Path(out).parent / f".tmp_cut_{self.job_id}"
                 parts_dir.mkdir(parents=True, exist_ok=True)
-                seg_files: List[str] = []
+                seg_files = []
                 try:
                     total_k = len(keeps)
                     for idx, (s, e) in enumerate(keeps):
@@ -957,13 +1140,14 @@ class StudioToolWorker(QThread):
             elif self.action == "shorts":
                 inp = self.params["input_path"]
                 out = self.params["output_path"]
+                total_dur = probe_video(inp).get("duration", 0.0)
                 fg, extra_in = build_shorts_9_16_filter(
                     self.params.get("cam_region"),
                     self.params.get("game_region"),
                     self.params.get("blur_regions") or [],
                     split_ratio=self.params.get("split_ratio", 0.36),
                 )
-                self.progress_updated.emit(self.job_id, 20.0, f"Рендер Shorts 9:16 ({enc})...")
+                self.progress_updated.emit(self.job_id, 5.0, f"Рендер Shorts 9:16 ({enc})...")
                 cmd = [
                     ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                     "-i", inp, *extra_in,
@@ -971,7 +1155,7 @@ class StudioToolWorker(QThread):
                     *encoder_ffmpeg_args(enc, q),
                     "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out,
                 ]
-                rc, err = self._run_ffmpeg_cancellable(cmd, timeout=1800)
+                rc, err = self._run_ffmpeg_with_progress(cmd, total_dur, f"Shorts ({enc})", timeout=1800)
                 if self._stop_requested:
                     if os.path.exists(out):
                         try:
@@ -989,7 +1173,8 @@ class StudioToolWorker(QThread):
                 if not ass_path or not os.path.exists(ass_path):
                     self._emit_done(False, f"Файл чата (.chat.ass) не найден: {ass_path}", "")
                     return
-                self.progress_updated.emit(self.job_id, 20.0, f"Наложение чата ({enc})...")
+                total_dur = probe_video(inp).get("duration", 0.0)
+                self.progress_updated.emit(self.job_id, 5.0, f"Наложение чата ({enc})...")
                 esc = escape_ffmpeg_filter_path(str(ass_path))
                 cmd = [
                     ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
@@ -997,7 +1182,7 @@ class StudioToolWorker(QThread):
                     *encoder_ffmpeg_args(enc, q),
                     "-c:a", "copy", "-movflags", "+faststart", out,
                 ]
-                rc, err = self._run_ffmpeg_cancellable(cmd, timeout=1800)
+                rc, err = self._run_ffmpeg_with_progress(cmd, total_dur, f"Чат ({enc})", timeout=1800)
                 if self._stop_requested:
                     if os.path.exists(out):
                         try:
@@ -1013,6 +1198,8 @@ class StudioToolWorker(QThread):
                 out = self.params["output_path"]
                 preset_id = self.params["preset_id"]
                 normalize_audio = self.params.get("normalize_audio", True)
+                voice_enhance = bool(self.params.get("voice_enhance", False))
+                watermark_path = (self.params.get("watermark_path") or "").strip()
                 pr = EXPORT_PRESETS[preset_id]
                 meta = probe_video(inp)
                 dur = max(1.0, meta.get("duration", 1.0))
@@ -1026,16 +1213,37 @@ class StudioToolWorker(QThread):
                 if pr.get("fps"):
                     vf += f",fps={pr['fps']}"
 
-                self.progress_updated.emit(self.job_id, 20.0, f"Экспорт ({pr['label']})...")
-                cmd = [
-                    ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-                    "-i", inp, "-vf", vf,
-                    *encoder_ffmpeg_args(enc, pr["cq"], target_bitrate_kbps=target_v_kbps),
-                ]
+                self.progress_updated.emit(self.job_id, 5.0, f"Экспорт ({pr['label']})...")
+                if watermark_path and os.path.exists(watermark_path):
+                    # #23 Overlay channel watermark in top-right corner (10% width, 75% opacity)
+                    fg = (
+                        f"[0:v]{vf}[base];"
+                        f"[1:v]format=rgba,colorchannelmixer=aa=0.78,scale=w='max(64,iw)':h=-1[wm];"
+                        f"[base][wm]overlay=W-w-28:24[vout]"
+                    )
+                    cmd = [
+                        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                        "-i", inp, "-i", watermark_path,
+                        "-filter_complex", fg, "-map", "[vout]", "-map", "0:a?",
+                        *encoder_ffmpeg_args(enc, pr["cq"], target_bitrate_kbps=target_v_kbps),
+                    ]
+                else:
+                    cmd = [
+                        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                        "-i", inp, "-vf", vf,
+                        *encoder_ffmpeg_args(enc, pr["cq"], target_bitrate_kbps=target_v_kbps),
+                    ]
+
+                # #24 Audio processing chain (Voice Compressor + Highpass + Loudnorm)
+                af_chain = []
+                if voice_enhance:
+                    af_chain.extend(["highpass=f=80", "acompressor=threshold=-20dB:ratio=3:attack=10:release=120"])
                 if normalize_audio:
-                    cmd.extend(["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"])
+                    af_chain.append("loudnorm=I=-14:TP=-1.5:LRA=11")
+                if af_chain:
+                    cmd.extend(["-af", ",".join(af_chain)])
                 cmd.extend(["-c:a", "aac", "-b:a", f"{pr['audio_kbps']}k", "-movflags", "+faststart", out])
-                rc, err = self._run_ffmpeg_cancellable(cmd, timeout=1800)
+                rc, err = self._run_ffmpeg_with_progress(cmd, dur, f"Экспорт ({enc})", timeout=1800)
                 if self._stop_requested:
                     if os.path.exists(out):
                         try:

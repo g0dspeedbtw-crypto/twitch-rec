@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+import requests
 from PySide6.QtCore import QThread, Signal
 
 from app.tools import (
@@ -21,6 +22,11 @@ from app.tools import (
     get_ffmpeg_path,
     probe_video,
 )
+
+CHAT_BOT_ACCOUNTS = {
+    "nightbot", "streamelements", "moobot", "fossabot", "wizebot",
+    "streamlabs", "botrixoficial", "soundalerts", "sery_bot", "commanderroot",
+}
 
 
 def _default_ass_font() -> str:
@@ -83,9 +89,19 @@ class TwitchChatRecorder:
 
     _PRIVMSG_RE = re.compile(r"^(?:@(?P<tags>\S+)\s+)?:(?P<user>[^!\s]+)!\S+\s+PRIVMSG\s+#\S+\s+:(?P<msg>.*)$")
 
-    def __init__(self, channel: str, video_path: str):
+    def __init__(
+        self,
+        channel: str,
+        video_path: str,
+        chat_position: str = "right",
+        chat_font_size: int = 28,
+        chat_hide_bots: bool = True,
+    ):
         self.channel = channel.strip().lower()
         self.video_path = video_path
+        self.chat_position = chat_position
+        self.chat_font_size = chat_font_size
+        self.chat_hide_bots = chat_hide_bots
         self.json_path = str(Path(video_path).with_suffix(".chat.json"))
         self.ass_path = str(Path(video_path).with_suffix(".chat.ass"))
         self.messages: List[dict] = []
@@ -171,14 +187,29 @@ class TwitchChatRecorder:
                 json.dumps({"channel": self.channel, "messages": self.messages}, ensure_ascii=False, indent=1),
                 encoding="utf-8",
             )
-            generate_chat_ass(self.messages, self.ass_path)
+            generate_chat_ass(
+                self.messages,
+                self.ass_path,
+                position=self.chat_position,
+                font_size=self.chat_font_size,
+                hide_bots=self.chat_hide_bots,
+            )
         except Exception:
             pass
 
 
-def generate_chat_ass(messages: List[dict], ass_path: str, max_visible: int = 12) -> str:
+def generate_chat_ass(
+    messages: List[dict],
+    ass_path: str,
+    max_visible: int = 12,
+    position: str = "right",
+    font_size: int = 28,
+    hide_bots: bool = True,
+) -> str:
     """Generate a sleek transparent side-chat ASS subtitle overlay from recorded chat messages."""
     font = _default_ass_font()
+    fsz = max(16, min(48, int(font_size or 28)))
+    margin_l, margin_r = (24, 1440) if position == "left" else (1440, 24)
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1920
@@ -187,16 +218,26 @@ WrapStyle: 1
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Chat,{font},28,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,1,1480,24,40,1
+Style: Chat,{font},{fsz},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,1,{margin_l},{margin_r},40,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+    filtered = []
+    for m in messages:
+        u_low = str(m.get("user", "")).strip().lower()
+        t_raw = str(m.get("text", "")).strip()
+        if not t_raw:
+            continue
+        if hide_bots and (u_low in CHAT_BOT_ACCOUNTS or t_raw.startswith("!")):
+            continue
+        filtered.append(m)
+
     lines = [header]
     window: List[dict] = []
-    for i, msg in enumerate(messages):
+    for i, msg in enumerate(filtered):
         t_start = float(msg.get("t", 0.0))
-        t_end = float(messages[i + 1]["t"]) if i + 1 < len(messages) else t_start + 8.0
+        t_end = float(filtered[i + 1]["t"]) if i + 1 < len(filtered) else t_start + 8.0
         t_end = max(t_start + 0.1, min(t_end, t_start + 12.0))
 
         window.append(msg)
@@ -215,6 +256,124 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     Path(ass_path).write_text("".join(lines), encoding="utf-8")
     return ass_path
+
+
+# ------------------------------------------------------------------ #33 Twitch VOD Chat Downloader
+def fetch_twitch_vod_chat(
+    vod_url_or_id: str,
+    output_base_path: str,
+    oauth_token: str = "",
+    proxy_url: str = "",
+    chat_position: str = "right",
+    chat_font_size: int = 28,
+    chat_hide_bots: bool = True,
+    max_pages: int = 80,
+    progress_cb: Optional[Callable[[int], None]] = None,
+) -> Tuple[bool, str, str, int]:
+    """
+    Download Twitch VOD chat via GQL into .chat.json and .chat.ass.
+    Returns (ok, json_path, error_or_msg, message_count).
+    """
+    m = re.search(r"twitch\.tv/videos/(\d+)", vod_url_or_id or "", re.IGNORECASE)
+    vod_id = m.group(1) if m else (vod_url_or_id.strip() if (vod_url_or_id or "").strip().isdigit() else "")
+    if not vod_id:
+        return False, "", "Укажите ссылку на Twitch VOD или его ID", 0
+
+    headers = {
+        "Client-ID": "kimne78kx3ncx6brgo4mv6wki5h1ko",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+    }
+    if oauth_token.strip():
+        tok = oauth_token.strip()
+        tok = tok[6:] if tok.lower().startswith("oauth:") else tok
+        headers["Authorization"] = f"OAuth {tok}"
+    proxies = {"http": proxy_url.strip(), "https": proxy_url.strip()} if proxy_url.strip() else None
+
+    gql_query = """
+    query($videoID: ID!, $cursor: String, $offset: Int) {
+      video(id: $videoID) {
+        comments(after: $cursor, contentOffsetSeconds: $offset) {
+          edges {
+            cursor
+            node {
+              contentOffsetSeconds
+              commenter { displayName }
+              message {
+                userColor
+                fragments { text }
+              }
+            }
+          }
+          pageInfo { hasNextPage }
+        }
+      }
+    }
+    """
+    messages: List[dict] = []
+    cursor: Optional[str] = None
+    try:
+        for page in range(max_pages):
+            variables = {"videoID": vod_id}
+            if cursor:
+                variables["cursor"] = cursor
+            else:
+                variables["offset"] = 0
+            resp = requests.post(
+                "https://gql.twitch.tv/gql",
+                json={"query": gql_query, "variables": variables},
+                headers=headers,
+                timeout=15,
+                proxies=proxies,
+            )
+            resp.raise_for_status()
+            video = (resp.json().get("data") or {}).get("video")
+            if not video:
+                if page == 0:
+                    return False, "", f"VOD #{vod_id} не найден или чат недоступен", 0
+                break
+            comments = video.get("comments") or {}
+            edges = comments.get("edges") or []
+            if not edges:
+                break
+            for edge in edges:
+                cursor = edge.get("cursor") or cursor
+                node = edge.get("node") or {}
+                msg_obj = node.get("message") or {}
+                frags = msg_obj.get("fragments") or []
+                txt = "".join(str(f.get("text") or "") for f in frags).strip()
+                if not txt:
+                    continue
+                user = ((node.get("commenter") or {}).get("displayName")) or "viewer"
+                color = msg_obj.get("userColor") or "#C4B5FD"
+                t_sec = round(max(0.0, float(node.get("contentOffsetSeconds") or 0.0)), 2)
+                messages.append({"t": t_sec, "user": user, "color": color, "text": txt})
+            if progress_cb:
+                progress_cb(len(messages))
+            if not (comments.get("pageInfo") or {}).get("hasNextPage"):
+                break
+    except Exception as exc:
+        if not messages:
+            return False, "", f"Ошибка загрузки чата VOD: {exc}", 0
+
+    if not messages:
+        return False, "", "В этом VOD нет сохранённых сообщений чата", 0
+
+    base = Path(output_base_path)
+    json_path = str(base.with_suffix(".chat.json"))
+    ass_path = str(base.with_suffix(".chat.ass"))
+    Path(json_path).write_text(
+        json.dumps({"channel": f"vod_{vod_id}", "vod_id": vod_id, "messages": messages}, ensure_ascii=False, indent=1),
+        encoding="utf-8",
+    )
+    generate_chat_ass(
+        messages,
+        ass_path,
+        position=chat_position,
+        font_size=chat_font_size,
+        hide_bots=chat_hide_bots,
+    )
+    return True, json_path, f"Загружено {len(messages)} сообщений чата VOD #{vod_id}", len(messages)
 
 
 # ------------------------------------------------------------------ #16 Chat Activity Heatmap & Highlights
@@ -409,6 +568,7 @@ class WhisperAIWorker(QThread):
         censor_beep: bool = True,
         encoder: str = "h264_nvenc",
         quality: int = 23,
+        initial_prompt: str = "",
         parent=None,
     ):
         super().__init__(parent)
@@ -423,6 +583,7 @@ class WhisperAIWorker(QThread):
         self.censor_beep = censor_beep
         self.encoder = encoder
         self.quality = quality
+        self.initial_prompt = (initial_prompt or "").strip()
         self._stop_requested = False
         self._proc: Optional[subprocess.Popen] = None
 
@@ -488,6 +649,7 @@ class WhisperAIWorker(QThread):
             segments_gen, _ = model.transcribe(
                 self.video_path,
                 language=self.language if self.language != "auto" else None,
+                initial_prompt=self.initial_prompt or None,
                 word_timestamps=True,
                 vad_filter=True,
             )
@@ -543,12 +705,45 @@ Style: Default,{font},{font_sz},&H00FFFFFF,&H0000FFFF,&H00000000,&H64000000,-1,0
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
         ass_lines = [ass_header]
-        for seg in segments:
-            txt = seg.text.strip().replace("\n", " ")
-            if txt:
-                ass_lines.append(
-                    f"Dialogue: 0,{_fmt_ass_time(seg.start)},{_fmt_ass_time(seg.end)},Default,,0,0,0,,{txt}\n"
-                )
+        if self.shorts_style:
+            # #20 Word-by-word karaoke pop-in Shorts subtitles (3 words per chunk, active word yellow & popped)
+            all_words = []
+            for seg in segments:
+                wlist = getattr(seg, "words", None) or []
+                for w in wlist:
+                    wt = (getattr(w, "word", "") or "").strip().replace("{", "").replace("}", "")
+                    if wt:
+                        all_words.append((float(w.start), float(w.end), wt))
+            if all_words:
+                chunk_size = 3
+                for ci in range(0, len(all_words), chunk_size):
+                    chunk = all_words[ci : ci + chunk_size]
+                    for active_idx, (ws, we, _) in enumerate(chunk):
+                        next_s = chunk[active_idx + 1][0] if active_idx + 1 < len(chunk) else we
+                        t_end = max(ws + 0.08, next_s)
+                        parts = []
+                        for wi, (_, _, wtxt) in enumerate(chunk):
+                            if wi == active_idx:
+                                parts.append(f"{{\\c&H0000FFFF&\\fscx114\\fscy114}}{wtxt.upper()}{{\\c&H00FFFFFF&\\fscx100\\fscy100}}")
+                            else:
+                                parts.append(wtxt.upper())
+                        ass_lines.append(
+                            f"Dialogue: 0,{_fmt_ass_time(ws)},{_fmt_ass_time(t_end)},Default,,0,0,0,,{' '.join(parts)}\n"
+                        )
+            else:
+                for seg in segments:
+                    txt = seg.text.strip().replace("\n", " ")
+                    if txt:
+                        ass_lines.append(
+                            f"Dialogue: 0,{_fmt_ass_time(seg.start)},{_fmt_ass_time(seg.end)},Default,,0,0,0,,{txt}\n"
+                        )
+        else:
+            for seg in segments:
+                txt = seg.text.strip().replace("\n", " ")
+                if txt:
+                    ass_lines.append(
+                        f"Dialogue: 0,{_fmt_ass_time(seg.start)},{_fmt_ass_time(seg.end)},Default,,0,0,0,,{txt}\n"
+                    )
         ass_path.write_text("".join(ass_lines), encoding="utf-8")
         self.log_message.emit(f"[AI] Субтитры сохранены: {srt_path.name} и {ass_path.name}")
 
@@ -659,3 +854,133 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         else:
             self.log_message.emit(f"[AI Цензура] Ошибка FFmpeg: {err}")
             self.finished_ai.emit(self.job_id, "", False)
+
+
+# ------------------------------------------------------------------ #26 AI YouTube Titles / Description / Timestamps
+def generate_youtube_metadata(
+    video_path: str,
+    llm_api_url: str = "",
+    llm_api_key: str = "",
+    llm_model: str = "gpt-4o-mini",
+    proxy_url: str = "",
+) -> Tuple[bool, dict]:
+    """
+    Generate YouTube titles, description, tags, and chapter timestamps from companion
+    .srt, .chat.json, .markers.json, and .meta.json files.
+    Uses OpenAI-compatible LLM API if configured, otherwise produces smart local heuristics.
+    """
+    p = Path(video_path)
+    meta_info = {}
+    meta_file = p.with_suffix(".meta.json")
+    if meta_file.exists():
+        try:
+            meta_info = json.loads(meta_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    markers = []
+    markers_file = p.with_suffix(".markers.json")
+    if markers_file.exists():
+        try:
+            markers = json.loads(markers_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    srt_excerpt = ""
+    srt_file = p.with_suffix(".srt")
+    if srt_file.exists():
+        try:
+            srt_excerpt = srt_file.read_text(encoding="utf-8")[:6000]
+        except Exception:
+            pass
+
+    chat_highlights: List[HighlightMoment] = []
+    chat_file = p.with_suffix(".chat.json")
+    if chat_file.exists():
+        _, chat_highlights = analyze_chat_highlights(str(chat_file), top_n=10)
+
+    def _mmss(sec: float) -> str:
+        s = max(0, int(sec))
+        h, rem = divmod(s, 3600)
+        m, sc = divmod(rem, 60)
+        return f"{h:02d}:{m:02d}:{sc:02d}" if h > 0 else f"{m:02d}:{sc:02d}"
+
+    chapters = ["00:00 Начало"]
+    for mk in markers[:15]:
+        chapters.append(f"{_mmss(mk.get('t', 0))} {mk.get('note', 'Хайлайт')}")
+    for hl in chat_highlights[:10]:
+        chapters.append(f"{_mmss(hl.timestamp_sec)} {hl.reason}")
+
+    channel_name = meta_info.get("channel") or p.parent.name
+    game_name = meta_info.get("game") or "Стрим"
+    stream_title = meta_info.get("title") or p.stem
+
+    # Fallback local heuristic when LLM API is not configured
+    if not llm_api_url.strip():
+        titles = [
+            f"{channel_name}: ЛУЧШИЕ МОМЕНТЫ — {game_name}",
+            f"{stream_title[:55]} | Нарезка {channel_name}",
+            f"ЧАТ В ШОКЕ! Топ моменты {channel_name} ({game_name})",
+            f"{channel_name} — самые смешные и жёсткие моменты стрима",
+            f"НЕВЕРОЯТНЫЙ СТРИМ {channel_name} в {game_name}",
+        ]
+        tags = [channel_name, game_name, "twitch", "нарезка", "хайлайты", "стрим", "лучшие моменты", "shorts"]
+        desc = (
+            f"Лучшие моменты со стрима {channel_name} ({game_name}).\n"
+            f"Оригинальный эфир: {stream_title}\n\n"
+            f"Таймкоды:\n" + "\n".join(chapters)
+        )
+        return True, {
+            "source": "local",
+            "titles": titles,
+            "description": desc,
+            "tags": ", ".join(tags),
+            "chapters": "\n".join(chapters),
+        }
+
+    # OpenAI-compatible LLM request (OpenAI, OpenRouter, Gemini OpenAI-compat, Ollama)
+    endpoint = llm_api_url.strip().rstrip("/")
+    if not endpoint.endswith("/chat/completions"):
+        endpoint = f"{endpoint}/chat/completions"
+
+    prompt = (
+        f"Ты опытный продюсер YouTube-канала нарезок стримеров.\n"
+        f"Канал: {channel_name}\nИгра: {game_name}\nНазвание стрима: {stream_title}\n"
+        f"Таймкоды хайлайтов:\n" + "\n".join(chapters[:15]) + "\n\n"
+        f"Фрагмент субтитров:\n{srt_excerpt[:3500] or '(субтитров нет)'}\n\n"
+        f"Ответь СТРОГО в JSON формате с ключами:\n"
+        f'{{"titles": ["5 кликабельных заголовков YouTube на русском"], '
+        f'"description": "SEO-описание с таймкодами", '
+        f'"tags": "теги через запятую", '
+        f'"chapters": "таймкоды построчно"}}'
+    )
+    headers = {"Content-Type": "application/json"}
+    if llm_api_key.strip():
+        headers["Authorization"] = f"Bearer {llm_api_key.strip()}"
+    proxies = {"http": proxy_url.strip(), "https": proxy_url.strip()} if proxy_url.strip() else None
+
+    try:
+        resp = requests.post(
+            endpoint,
+            json={
+                "model": llm_model.strip() or "gpt-4o-mini",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.7,
+            },
+            headers=headers,
+            timeout=45,
+            proxies=proxies,
+        )
+        resp.raise_for_status()
+        content = (((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content")) or ""
+        m_json = re.search(r"\{[\s\S]*\}", content)
+        parsed = json.loads(m_json.group(0)) if m_json else {}
+        return True, {
+            "source": "llm",
+            "titles": parsed.get("titles") or [stream_title],
+            "description": parsed.get("description") or content,
+            "tags": parsed.get("tags") or f"{channel_name}, {game_name}, twitch",
+            "chapters": parsed.get("chapters") or "\n".join(chapters),
+        }
+    except Exception as exc:
+        return False, {"error": f"Ошибка LLM API: {exc}"}

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -40,7 +42,7 @@ def get_data_dir() -> Path:
 
 BASE_DIR = get_resource_dir()
 DATA_DIR = get_data_dir()
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 DEFAULT_GITHUB_REPO = "g0dspeedbtw-crypto/twitch-rec"
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -63,6 +65,30 @@ DEFAULT_RECORDINGS_DIR = (
     else (DATA_DIR / "recordings")
 )
 TEMPLATES_DIR = DATA_DIR / "templates"
+LOG_PATH = DATA_DIR / "app.log"
+LIBRARY_CACHE_PATH = DATA_DIR / "library_cache.json"
+
+_FILE_LOGGER: Optional[logging.Logger] = None
+
+
+def get_file_logger() -> logging.Logger:
+    """Return a rotating file logger (5 MB x 3 backups) inside DATA_DIR."""
+    global _FILE_LOGGER
+    if _FILE_LOGGER is not None:
+        return _FILE_LOGGER
+    logger = logging.getLogger("twitch_recorder_pro")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        try:
+            handler = RotatingFileHandler(
+                str(LOG_PATH), maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+            )
+            handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+            logger.addHandler(handler)
+        except Exception:
+            pass
+    _FILE_LOGGER = logger
+    return logger
 
 PLATFORMS = [
     ("Twitch", "twitch"),
@@ -269,28 +295,49 @@ class AppConfig:
     proxy_url: str = ""
     # Disk protection (#14)
     min_free_gb: int = 15
+    hard_disk_guard: bool = True
     auto_cleanup_old: bool = False
     max_age_days: int = 30
     # System & Tray (#19, #30, #31)
     minimize_to_tray: bool = True
     start_with_windows: bool = False
     marker_hotkey: str = "F9"
-    # Notifications (#32)
+    # Notifications & Remote Control (#32, #41)
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_bot_enabled: bool = False
     discord_webhook_url: str = ""
     notify_on_live: bool = True
     notify_on_finish: bool = True
     notify_on_blur: bool = True
-    # Smart GPU Post-Process Queue (#33, #34)
+    # Smart GPU Post-Process Queue & Game Mode (#33, #34, #43, #45)
     max_concurrent_blurs: int = 1
     night_render_enabled: bool = False
     night_render_start: str = "02:00"
     night_render_end: str = "08:00"
     normalize_audio_default: bool = False
-    # AI & Censorship (#6, #22)
+    low_priority_render: bool = True
+    game_mode_enabled: bool = True
+    game_processes: str = (
+        "cs2.exe,dota2.exe,VALORANT-Win64-Shipping.exe,GTA5.exe,Cyberpunk2077.exe,"
+        "FortniteClient-Win64-Shipping.exe,r5apex.exe,EscapeFromTarkov.exe,eldenring.exe,"
+        "cs2,dota2,LeagueClient"
+    )
+    # AI, Censorship & LLM (#6, #22, #26, #30)
     whisper_model: str = "small"
+    whisper_prompt: str = ""
     banned_words: str = "блять,сука,нахуй,пиздец,ебать,пидор,нигер,даун"
+    llm_api_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = "gpt-4o-mini"
+    # Chat Overlay & Watermark (#23, #32)
+    chat_position: str = "right"   # "right" | "left"
+    chat_font_size: int = 28
+    chat_hide_bots: bool = True
+    watermark_path: str = ""
+    # Appearance (#48)
+    theme: str = "purple"          # "purple" | "oled" | "blue" | "emerald" | "light"
+    compact_cards: bool = False
     # Cloud Auto-Updates (GitHub Releases)
     github_repo: str = DEFAULT_GITHUB_REPO
     auto_check_updates: bool = True
@@ -430,6 +477,7 @@ class AppConfig:
             twitch_oauth_token=str(raw.get("twitch_oauth_token", "")),
             proxy_url=str(raw.get("proxy_url", "")),
             min_free_gb=max(1, int(raw.get("min_free_gb", 15))),
+            hard_disk_guard=bool(raw.get("hard_disk_guard", True)),
             auto_cleanup_old=bool(raw.get("auto_cleanup_old", False)),
             max_age_days=max(1, int(raw.get("max_age_days", 30))),
             minimize_to_tray=bool(raw.get("minimize_to_tray", True)),
@@ -437,6 +485,7 @@ class AppConfig:
             marker_hotkey=str(raw.get("marker_hotkey", "F9")),
             telegram_bot_token=str(raw.get("telegram_bot_token", "")),
             telegram_chat_id=str(raw.get("telegram_chat_id", "")),
+            telegram_bot_enabled=bool(raw.get("telegram_bot_enabled", False)),
             discord_webhook_url=str(raw.get("discord_webhook_url", "")),
             notify_on_live=bool(raw.get("notify_on_live", True)),
             notify_on_finish=bool(raw.get("notify_on_finish", True)),
@@ -446,10 +495,30 @@ class AppConfig:
             night_render_start=str(raw.get("night_render_start", "02:00")),
             night_render_end=str(raw.get("night_render_end", "08:00")),
             normalize_audio_default=bool(raw.get("normalize_audio_default", False)),
+            low_priority_render=bool(raw.get("low_priority_render", True)),
+            game_mode_enabled=bool(raw.get("game_mode_enabled", True)),
+            game_processes=str(
+                raw.get(
+                    "game_processes",
+                    "cs2.exe,dota2.exe,VALORANT-Win64-Shipping.exe,GTA5.exe,Cyberpunk2077.exe,"
+                    "FortniteClient-Win64-Shipping.exe,r5apex.exe,EscapeFromTarkov.exe,eldenring.exe,"
+                    "cs2,dota2,LeagueClient",
+                )
+            ),
             whisper_model=str(raw.get("whisper_model", "small")),
+            whisper_prompt=str(raw.get("whisper_prompt", "")),
             banned_words=str(
                 raw.get("banned_words", "блять,сука,нахуй,пиздец,ебать,пидор,нигер,даун")
             ),
+            llm_api_url=str(raw.get("llm_api_url", "")),
+            llm_api_key=str(raw.get("llm_api_key", "")),
+            llm_model=str(raw.get("llm_model", "gpt-4o-mini")),
+            chat_position=raw.get("chat_position", "right") if raw.get("chat_position") in ("right", "left") else "right",
+            chat_font_size=max(16, min(48, int(raw.get("chat_font_size", 28)))),
+            chat_hide_bots=bool(raw.get("chat_hide_bots", True)),
+            watermark_path=str(raw.get("watermark_path", "")),
+            theme=raw.get("theme", "purple") if raw.get("theme") in ("purple", "oled", "blue", "emerald", "light") else "purple",
+            compact_cards=bool(raw.get("compact_cards", False)),
             github_repo=normalize_github_repo(str(raw.get("github_repo") or DEFAULT_GITHUB_REPO)),
             auto_check_updates=bool(raw.get("auto_check_updates", True)),
             channels=channels,

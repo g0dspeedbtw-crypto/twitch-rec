@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, Signal
 from PySide6.QtGui import QAction, QColor
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEngineSettings
@@ -10,6 +10,37 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QMessageBox, QSy
 from app.local_media_server import LocalMediaServer
 from app.ui.icons import apply_windows_dark_titlebar, make_app_icon
 from app.web_bridge import AppBridge
+
+
+class DropWebEngineView(QWebEngineView):
+    """WebEngineView subclass that intercepts native Finder/Explorer file drops (#49)."""
+
+    filesDropped = Signal(list)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+            if paths:
+                self.filesDropped.emit(paths)
+                event.acceptProposedAction()
+                return
+        super().dropEvent(event)
 
 
 class StudioDesktopWindow(QMainWindow):
@@ -38,8 +69,9 @@ class StudioDesktopWindow(QMainWindow):
         self.bridge = AppBridge(self, self.media_server)
         self.bridge.recordingCountChanged.connect(self._on_recording_count_changed)
 
-        # Chromium WebEngine View
-        self.web = QWebEngineView(self)
+        # Chromium WebEngine View with Native OS Drag & Drop (#49)
+        self.web = DropWebEngineView(self)
+        self.web.filesDropped.connect(self.bridge.handleNativeFileDrop)
         self.web.page().setBackgroundColor(QColor("#090A0F"))
         settings = self.web.settings()
         settings.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, True)
@@ -57,26 +89,50 @@ class StudioDesktopWindow(QMainWindow):
     def _setup_tray(self) -> None:
         self.tray = QSystemTrayIcon(make_app_icon(64, recording_dot=False), self)
         self.tray.setToolTip("Twitch Recorder Pro")
-        menu = QMenu()
-        act_open = QAction("Открыть окно", self)
-        act_open.triggered.connect(self._restore_from_tray)
-        act_stop = QAction("Остановить все записи", self)
-        act_stop.triggered.connect(self.bridge.stopAllRecordings)
-        act_quit = QAction("Выход", self)
-        act_quit.triggered.connect(self._quit_completely)
-        menu.addAction(act_open)
-        menu.addAction(act_stop)
-        menu.addSeparator()
-        menu.addAction(act_quit)
-        self.tray.setContextMenu(menu)
+        self._tray_menu = QMenu()
+        self.tray.setContextMenu(self._tray_menu)
+        self._rebuild_tray_menu()
         self.tray.activated.connect(
             lambda reason: self._restore_from_tray() if reason == QSystemTrayIcon.DoubleClick else None
         )
         self.tray.show()
 
+    def _rebuild_tray_menu(self) -> None:
+        menu = self._tray_menu
+        menu.clear()
+        act_open = QAction("Открыть окно", self)
+        act_open.triggered.connect(self._restore_from_tray)
+        menu.addAction(act_open)
+
+        active_recs = list(self.bridge.live_recorders.items())
+        if active_recs:
+            menu.addSeparator()
+            for key, w in active_recs:
+                uname = w.channel.username
+                act_mk = QAction(f"Маркер: {uname}", self)
+                act_mk.triggered.connect(lambda _=False, k=key: self.bridge.dropMarker(k))
+                menu.addAction(act_mk)
+                act_st = QAction(f"Стоп: {uname}", self)
+                act_st.triggered.connect(lambda _=False, k=key: self.bridge.stopRecording(k))
+                menu.addAction(act_st)
+            menu.addSeparator()
+            act_stop_all = QAction("Остановить все записи", self)
+            act_stop_all.triggered.connect(self.bridge.stopAllRecordings)
+            menu.addAction(act_stop_all)
+        else:
+            act_rec_all = QAction("Записать всех онлайн", self)
+            act_rec_all.triggered.connect(self.bridge.recordAllOnline)
+            menu.addAction(act_rec_all)
+
+        menu.addSeparator()
+        act_quit = QAction("Выход", self)
+        act_quit.triggered.connect(self._quit_completely)
+        menu.addAction(act_quit)
+
     def _on_recording_count_changed(self, count: int) -> None:
         self.tray.setIcon(make_app_icon(64, recording_dot=(count > 0)))
         self.tray.setToolTip(f"Twitch Recorder Pro — активных записей: {count}")
+        self._rebuild_tray_menu()
 
     def _restore_from_tray(self) -> None:
         self.showNormal()
