@@ -1624,7 +1624,8 @@ class AppBridge(QObject):
             "max_concurrent_blurs", "night_render_enabled", "night_render_start",
             "night_render_end", "normalize_audio_default", "low_priority_render",
             "game_mode_enabled", "game_processes", "whisper_model", "whisper_prompt", "banned_words",
-            "llm_api_url", "llm_api_key", "llm_model", "ai_brand_voice",
+            "llm_api_url", "llm_api_key", "llm_model", "ai_brand_voice", "local_ai_model",
+            "youtube_client_secrets", "vk_access_token", "vk_group_id",
             "chat_position", "chat_font_size", "chat_hide_bots", "watermark_path",
             "theme", "compact_cards", "github_repo", "auto_check_updates",
             "smart_segment_blur", "native_os_notifications", "auto_publish_telegram",
@@ -1821,6 +1822,13 @@ class AppBridge(QObject):
                         if not cp and vp:
                             cp = str(Path(vp).with_suffix(".chat.json"))
                         res = ai_suite.analyze_chat_sentiment(cp)
+                    elif task_type == "publish_package":
+                        res = ai_suite.generate_full_publish_package(
+                            vp,
+                            str(payload.get("format_mode") or "full"),
+                            list(payload.get("platforms") or ["youtube"]),
+                            cfg_copy,
+                        )
                 except Exception as exc:
                     res = {"ok": False, "error": str(exc)}
                 self.done.emit(task_type, res)
@@ -1853,6 +1861,161 @@ class AppBridge(QObject):
         w.done.connect(_on_done)
         self._aux_workers.append(w)
         w.start()
+
+    @Slot(result=str)
+    def getLocalAiStatus(self) -> str:
+        from app.ai_suite import detect_local_llm_status
+        return json.dumps(detect_local_llm_status(), ensure_ascii=False)
+
+    @Slot(str)
+    def pullOllamaModel(self, model_name: str) -> None:
+        m = (model_name or "qwen2.5:3b").strip()
+        self._toast("Локальный AI (Ollama)", f"Скачивание модели {m}...", "info")
+        bridge = self
+
+        class _PullWorker(QThread):
+            done = Signal(bool, str)
+
+            def run(self) -> None:
+                import shutil
+                ollama = shutil.which("ollama")
+                if not ollama and sys.platform == "darwin":
+                    for cand in ("/usr/local/bin/ollama", "/opt/homebrew/bin/ollama", "/Applications/Ollama.app/Contents/Resources/ollama"):
+                        if os.path.exists(cand):
+                            ollama = cand
+                            break
+                if not ollama:
+                    self.done.emit(False, "Ollama не установлен. Скачайте бесплатно с ollama.com")
+                    return
+                try:
+                    res = subprocess.run([ollama, "pull", m], capture_output=True, text=True, timeout=1800, creationflags=CREATE_NO_WINDOW)
+                    if res.returncode == 0:
+                        self.done.emit(True, f"Локальная модель {m} установлена и готова к работе без API!")
+                    else:
+                        self.done.emit(False, (res.stderr or "Не удалось скачать модель")[:200])
+                except Exception as exc:
+                    self.done.emit(False, str(exc))
+
+        pw = _PullWorker(self)
+
+        def _on_pull(ok: bool, msg: str) -> None:
+            bridge._toast("Локальный AI (Ollama)", msg, "success" if ok else "error")
+            bridge._log(f"[Локальный AI] {msg}")
+            from app.ai_suite import detect_local_llm_status
+            bridge._emit("local_ai_status", detect_local_llm_status())
+            if pw in bridge._aux_workers:
+                bridge._aux_workers.remove(pw)
+
+        pw.done.connect(_on_pull)
+        self._aux_workers.append(pw)
+        pw.start()
+
+    @Slot(str)
+    def executeAutoPublish(self, payload_json: str) -> None:
+        """Prepare video (full / clip / vertical 9:16) and publish to selected social platforms."""
+        try:
+            d = json.loads(payload_json or "{}")
+        except Exception:
+            return
+        vp = str(d.get("video_path") or "").strip()
+        if not vp or not os.path.exists(vp):
+            self._toast("Автопостинг", "Сначала выберите видеофайл", "error")
+            return
+        platforms = list(d.get("platforms") or [])
+        if not platforms:
+            self._toast("Автопостинг", "Выберите хотя бы одну соцсеть", "error")
+            return
+
+        cfg_copy = deepcopy(self.config)
+        bridge = self
+        self._toast("Автопостинг запущен", f"Подготовка и публикация в {', '.join(platforms)}...", "info")
+
+        class _PubWorker(QThread):
+            done = Signal(object)
+
+            def run(self) -> None:
+                from app import publisher
+                from app.tools import build_shorts_9_16_filter, encoder_ffmpeg_args, get_ffmpeg_path, probe_video, resolve_encoder, trim_video_fast
+                fmt = str(d.get("format_mode") or "full")
+                target_video = vp
+                thumb_path = str(d.get("thumb_path") or "")
+                title = str(d.get("title") or Path(vp).stem)
+                desc = str(d.get("description") or "")
+                hashtags = str(d.get("hashtags") or "")
+                privacy = str(d.get("privacy") or "unlisted")
+                results: List[dict] = []
+
+                try:
+                    # Step 1: Prepare Clip or Vertical 9:16 video if requested
+                    if fmt == "clip":
+                        s = float(d.get("clip_start") or 0)
+                        e = float(d.get("clip_end") or 0)
+                        if e > s + 1.0:
+                            out_clip = str(Path(vp).with_name(f"{Path(vp).stem}_clip_{int(s)}-{int(e)}.mp4"))
+                            ok_c, err_c = trim_video_fast(vp, s, e, out_clip, accurate_reencode=False)
+                            if ok_c and os.path.exists(out_clip):
+                                target_video = out_clip
+                            else:
+                                results.append({"platform": "Подготовка нарезки", "ok": False, "message": err_c})
+                    elif fmt == "vertical":
+                        ffmpeg = get_ffmpeg_path()
+                        if ffmpeg:
+                            out_v = str(Path(vp).with_name(f"{Path(vp).stem}_vertical_9x16.mp4"))
+                            dur = probe_video(vp).get("duration", 0.0)
+                            layout = str(d.get("vertical_layout") or "blur_bg")
+                            cam_r = BlurRegion(0.02, 0.55, 0.28, 0.35) if layout != "blur_bg" else None
+                            game_r = BlurRegion(0.22, 0.05, 0.56, 0.90) if layout != "blur_bg" else None
+                            fg, extra_in = build_shorts_9_16_filter(
+                                cam_r, game_r, [], layout=layout, progress_bar=True, total_duration=dur
+                            )
+                            enc = resolve_encoder(cfg_copy.encoder)
+                            cmd = [
+                                ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                                "-i", vp, *extra_in, "-filter_complex", fg,
+                                "-map", "[vout]", "-map", "0:a?",
+                                *encoder_ffmpeg_args(enc, cfg_copy.video_quality),
+                                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_v,
+                            ]
+                            res_ff = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, creationflags=CREATE_NO_WINDOW)
+                            if res_ff.returncode == 0 and os.path.exists(out_v):
+                                target_video = out_v
+                            else:
+                                results.append({"platform": "Рендер 9:16", "ok": False, "message": (res_ff.stderr or "Ошибка")[:180]})
+
+                    # Step 2: Publish to each selected platform
+                    for plat in platforms:
+                        if plat == "telegram":
+                            ok, msg = publisher.publish_to_telegram(cfg_copy, target_video, thumb_path, title, desc, hashtags)
+                        elif plat == "discord":
+                            ok, msg = publisher.publish_to_discord(cfg_copy, target_video, thumb_path, title, desc, hashtags)
+                        elif plat == "youtube":
+                            ok, msg = publisher.publish_to_youtube(cfg_copy, target_video, thumb_path, title, desc, hashtags, privacy)
+                        elif plat == "vk":
+                            ok, msg = publisher.publish_to_vk(cfg_copy, target_video, title, desc, hashtags, is_vertical=(fmt == "vertical"))
+                        elif plat == "tiktok":
+                            ok, msg = publisher.publish_to_tiktok(target_video)
+                        else:
+                            continue
+                        results.append({"platform": plat.upper(), "ok": ok, "message": msg})
+                except Exception as exc:
+                    results.append({"platform": "Система", "ok": False, "message": str(exc)})
+
+                self.done.emit({"ok": all(r["ok"] for r in results), "video_path": target_video, "results": results})
+
+        pubw = _PubWorker(self)
+
+        def _on_pub(res: object) -> None:
+            r = res if isinstance(res, dict) else {}
+            ok_cnt = sum(1 for x in (r.get("results") or []) if x.get("ok"))
+            tot = len(r.get("results") or [])
+            bridge._toast("Автопостинг завершён", f"Успешно: {ok_cnt} из {tot}", "success" if ok_cnt == tot else "info")
+            bridge._emit("publish_result", r)
+            if pubw in bridge._aux_workers:
+                bridge._aux_workers.remove(pubw)
+
+        pubw.done.connect(_on_pub)
+        self._aux_workers.append(pubw)
+        pubw.start()
 
     # ------------------------------------------------------------------ #41 Interactive Telegram Bot
     def _sync_telegram_bot(self) -> None:

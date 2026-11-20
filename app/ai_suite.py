@@ -33,6 +33,52 @@ from app.tools import (
 )
 
 
+# ------------------------------------------------------------------ Local AI Auto-Discovery (Ollama / LM Studio — Zero API!)
+def detect_local_llm_status() -> dict:
+    """Detect local Ollama (11434) or LM Studio (1234) so AI works 100% locally without any API keys."""
+    ollama_bin = shutil.which("ollama")
+    if not ollama_bin and sys.platform == "darwin":
+        for cand in ("/usr/local/bin/ollama", "/opt/homebrew/bin/ollama", "/Applications/Ollama.app/Contents/Resources/ollama"):
+            if os.path.exists(cand):
+                ollama_bin = cand
+                break
+    status = {
+        "ollama_installed": bool(ollama_bin),
+        "ollama_running": False,
+        "lmstudio_running": False,
+        "models": [],
+        "active_url": "",
+        "active_model": "",
+        "engine_label": "Встроенный оффлайн AI (без API)",
+    }
+    try:
+        r = requests.get("http://127.0.0.1:11434/api/tags", timeout=1.5)
+        if r.status_code == 200:
+            models = [m.get("name", "") for m in (r.json().get("models") or []) if m.get("name")]
+            status["ollama_running"] = True
+            status["models"] = models
+            if models:
+                status["active_url"] = "http://127.0.0.1:11434/v1"
+                status["active_model"] = models[0]
+                status["engine_label"] = f"Локальный Ollama ({models[0]})"
+                return status
+    except Exception:
+        pass
+    try:
+        r2 = requests.get("http://127.0.0.1:1234/v1/models", timeout=1.2)
+        if r2.status_code == 200:
+            models = [m.get("id", "") for m in (r2.json().get("data") or []) if m.get("id")]
+            status["lmstudio_running"] = True
+            status["models"] = models
+            if models:
+                status["active_url"] = "http://127.0.0.1:1234/v1"
+                status["active_model"] = models[0]
+                status["engine_label"] = f"Локальный LM Studio ({models[0]})"
+    except Exception:
+        pass
+    return status
+
+
 # ------------------------------------------------------------------ Shared LLM / Vision Helper
 def _call_llm_text(
     cfg: AppConfig,
@@ -41,12 +87,20 @@ def _call_llm_text(
     image_b64: Optional[str] = None,
     timeout: int = 45,
 ) -> Optional[str]:
-    """Call OpenAI-compatible Chat Completions API (OpenAI, Gemini, OpenRouter, Ollama)."""
+    """Call configured LLM API OR automatically fall back to local Ollama / LM Studio (zero API keys!)."""
     api_url = (getattr(cfg, "llm_api_url", "") or "").strip()
     api_key = (getattr(cfg, "llm_api_key", "") or "").strip()
     model = (getattr(cfg, "llm_model", "") or "gpt-4o-mini").strip()
+
     if not api_url:
-        return None
+        loc = detect_local_llm_status()
+        if loc["active_url"] and loc["active_model"]:
+            api_url = loc["active_url"]
+            pref = (getattr(cfg, "local_ai_model", "") or "").strip()
+            model = pref if (pref and pref in loc["models"]) else loc["active_model"]
+            api_key = "local"
+        else:
+            return None
     endpoint = api_url.rstrip("/")
     if not endpoint.endswith("/chat/completions"):
         endpoint += "/chat/completions"
@@ -1328,3 +1382,152 @@ def analyze_chat_sentiment(chat_json_path: str) -> dict:
         "peak_hype_min": peak_hype["min"],
         "timeline": timeline[:240],
     }
+
+
+# ------------------------------------------------------------------ Full Local AI Publish Package Generator (Zero-API!)
+def generate_full_publish_package(
+    video_path: str,
+    format_mode: str,   # "full" | "clip" | "vertical"
+    platforms: List[str],
+    cfg: AppConfig,
+) -> dict:
+    """
+    Generate complete ready-to-post package (5 titles, description with timestamps, hashtags,
+    and thumbnail headline/subtitle) using Local Ollama, Cloud LLM, OR built-in Offline Russian NLP.
+    """
+    p = Path(video_path) if video_path else Path("stream.mp4")
+    speech, markers, chat_msgs = _load_sidecar_text(video_path) if (video_path and os.path.exists(video_path)) else ("", [], [])
+    dur = probe_video(video_path).get("duration", 0.0) if (video_path and os.path.exists(video_path)) else 0.0
+
+    # Extract rich context from .meta.json if present
+    streamer = ""
+    game = ""
+    stream_title = ""
+    meta_p = p.with_suffix(".meta.json")
+    if meta_p.exists():
+        try:
+            md = json.loads(meta_p.read_text(encoding="utf-8"))
+            streamer = str(md.get("channel") or md.get("username") or "").strip()
+            game = str(md.get("game") or "").strip()
+            stream_title = str(md.get("title") or "").strip()
+        except Exception:
+            pass
+    if not streamer:
+        m_st = re.sub(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_", "", p.stem)
+        streamer = m_st.split("_")[0] or "Стример"
+
+    # Offline NLP keyword extraction from speech + chat
+    stop_w = {"это", "как", "что", "вот", "для", "или", "если", "есть", "был", "была", "были", "просто", "очень", "меня", "тебя", "него", "когда", "даже", "чтобы", "здесь", "тут", "там", "надо", "можно"}
+    word_freq: Dict[str, int] = {}
+    for src_txt in (speech, " ".join(str(m.get("text") or "") for m in chat_msgs[:400]), stream_title):
+        for w in re.findall(r"[а-яА-ЯёЁa-zA-Z0-9]{4,}", src_txt.lower()):
+            if w not in stop_w and not w.isdigit():
+                word_freq[w] = word_freq.get(w, 0) + 1
+    top_words = [w for w, _ in sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:8]]
+
+    fmt_label = {
+        "full": "полноценный ролик YouTube (16:9)",
+        "clip": "динамичная нарезка / хайлайт (16:9)",
+        "vertical": "вертикальный Shorts / TikTok / Reels (9:16)",
+    }.get(format_mode, "ролик")
+
+    # Try Local Ollama / Cloud LLM first
+    loc = detect_local_llm_status()
+    engine_label = loc["engine_label"] if not (cfg.llm_api_url or "").strip() else f"Cloud LLM ({cfg.llm_model})"
+
+    prompt = (
+        f"Сделай готовый пакет для публикации ({fmt_label}) на платформы: {', '.join(platforms or ['youtube'])}.\n"
+        f"Стример: {streamer}. Игра: {game or 'Стрим'}. Длительность: {format_duration(dur)}.\n"
+        f"Ключевые слова: {', '.join(top_words)}.\n"
+        f"Маркеры: {json.dumps(markers[:10], ensure_ascii=False)}\n"
+        f"Речь: {speech[:1800]}\n\n"
+        "Верни строго JSON без markdown-обёртки:\n"
+        '{"titles":["...","...","...","...","..."],"description":"...","hashtags":"#tag1 #tag2 ...","thumb_headline":"КОРОТКИЙ КАПС","thumb_subtitle":"ПЛАШКА"}'
+    )
+    ans = _call_llm_text(cfg, "Ты топовый контент-продюсер YouTube/TikTok/Telegram. Отвечай строго валидным JSON на русском.", prompt)
+    if ans:
+        try:
+            jm = re.search(r"\{.*\}", ans, re.DOTALL)
+            if jm:
+                parsed = json.loads(jm.group(0))
+                if parsed.get("titles"):
+                    return {
+                        "ok": True,
+                        "ai_engine": engine_label,
+                        "titles": [str(t) for t in parsed["titles"][:5]],
+                        "description": str(parsed.get("description") or ""),
+                        "hashtags": str(parsed.get("hashtags") or ""),
+                        "thumb_headline": str(parsed.get("thumb_headline") or "ЛУЧШИЙ МОМЕНТ!"),
+                        "thumb_subtitle": str(parsed.get("thumb_subtitle") or streamer.upper()),
+                    }
+        except Exception:
+            pass
+
+    # Built-in Smart Offline Russian NLP Generator (Works 100% locally without Ollama or API!)
+    game_part = f" в {game}" if game else ""
+    kw_clean = [re.sub(r"[^а-яА-ЯёЁa-zA-Z0-9]", "", w) for w in top_words if len(w) >= 4]
+
+    if format_mode == "vertical":
+        titles = [
+            f"{streamer} взорвал чат{game_part}! 🔥 #shorts",
+            f"ЭТО НЕВОЗМОЖНО ПОВТОРИТЬ 😱 | {streamer} #shorts",
+            f"Лучшие 30 секунд со стрима {streamer} 😂 #shorts",
+            f"Чат просто сошёл с ума{game_part} 💀 #shorts",
+            f"Смотреть до конца! Топ момент {streamer} ⚡ #shorts",
+        ]
+        base_tags = ["#shorts", "#tiktok", "#reels", "#twitch", "#стрим", "#хайлайты", "#нарезка"]
+        th_head = "ЭТО БЕЗУМИЕ!"
+    elif format_mode == "clip":
+        titles = [
+            f"ЛУЧШЕЕ СО СТРИМА {streamer}{game_part} — Чат в шоке! 🔥",
+            f"{streamer} выдал легендарный момент{game_part} 😂",
+            f"Топ-нарезка эфира {streamer} ({format_duration(dur)}) ⚡",
+            f"Самые смешные и жёсткие моменты {streamer}{game_part} 💀",
+            f"{stream_title or f'Хайлайты {streamer}'}{game_part} 🏆",
+        ]
+        base_tags = ["#twitch", "#нарезка", "#хайлайты", "#стрим", "#моменты", "#ютуб"]
+        th_head = "ТОП НАРЕЗКА!"
+    else:
+        titles = [
+            f"{stream_title or f'Полная запись стрима {streamer}'}{game_part} 🔥",
+            f"{streamer}{game_part} — Полный эфир ({format_duration(dur)}) 🎬",
+            f"Легендарный стрим {streamer}{game_part} | Без рекламы ⚡",
+            f"{streamer} играет{game_part} — Лучшие моменты и эмоции 🏆",
+            f"Запись прямого эфира {streamer}{game_part} ({p.stem[:10]})",
+        ]
+        base_tags = ["#twitch", "#стрим", "#записьстрима", "#прямойэфир", "#игры", "#youtube"]
+        th_head = (game or "ЛУЧШИЙ СТРИМ").upper()[:20]
+
+    extra_tags = [f"#{re.sub(r'[^а-яА-ЯёЁa-zA-Z0-9]', '', streamer.lower())}"]
+    if game:
+        extra_tags.append(f"#{re.sub(r'[^а-яА-ЯёЁa-zA-Z0-9]', '', game.lower())}")
+    for w in kw_clean[:4]:
+        tag = f"#{w}"
+        if tag not in base_tags and tag not in extra_tags:
+            extra_tags.append(tag)
+    hashtags = " ".join(dict.fromkeys(base_tags + extra_tags))
+
+    mk_block = ""
+    if markers:
+        mk_block = "\n\n⏱ Таймкоды:\n00:00 Начало\n" + "\n".join(
+            f"{format_duration(float(m.get('t', 0)))} — {m.get('note') or 'Топ момент'}" for m in markers[:12]
+        )
+
+    description = (
+        f"🔥 {titles[0]}\n\n"
+        f"Канал: {streamer}" + (f" · Игра: {game}" if game else "") + f" · Длительность: {format_duration(dur)}\n"
+        f"Самые яркие эмоции, реакции чата и лучшие моменты с эфира!"
+        f"{mk_block}\n\n"
+        f"👍 Ставьте лайк и подписывайтесь, чтобы не пропускать новые ролики!"
+    )
+
+    return {
+        "ok": True,
+        "ai_engine": "Встроенный оффлайн AI (без API)",
+        "titles": titles,
+        "description": description,
+        "hashtags": hashtags,
+        "thumb_headline": th_head,
+        "thumb_subtitle": f"{streamer.upper()}" + (f" · {game.upper()[:16]}" if game else " · TWITCH"),
+    }
+

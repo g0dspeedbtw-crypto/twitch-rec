@@ -42,7 +42,7 @@ def get_data_dir() -> Path:
 
 BASE_DIR = get_resource_dir()
 DATA_DIR = get_data_dir()
-APP_VERSION = "3.0.2"
+APP_VERSION = "3.1.0"
 DEFAULT_GITHUB_REPO = "g0dspeedbtw-crypto/twitch-rec"
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -350,6 +350,11 @@ class AppConfig:
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
     ai_brand_voice: str = ""
+    local_ai_model: str = "qwen2.5:3b"
+    # Social Auto-Posting (#3.1.0)
+    youtube_client_secrets: str = ""
+    vk_access_token: str = ""
+    vk_group_id: str = ""
     # Chat Overlay & Watermark (#23, #32)
     chat_position: str = "right"   # "right" | "left"
     chat_font_size: int = 28

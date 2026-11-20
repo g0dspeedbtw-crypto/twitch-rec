@@ -52,6 +52,27 @@
     aiChatSentiment: null,
     speechSearchQuery: "",
     speechSearchHits: [],
+    localAi: null,
+    pub: {
+      videoPath: "",
+      formatMode: "full", // "full" | "clip" | "vertical"
+      platforms: ["youtube", "telegram"],
+      title: "",
+      titleVariants: [],
+      description: "",
+      hashtags: "#twitch #стрим #нарезка #хайлайты #игры",
+      thumbPath: "",
+      thumbHeadline: "ЛУЧШИЙ МОМЕНТ СТРИМА",
+      thumbSubtitle: "TWITCH HIGHLIGHTS",
+      thumbAccent: "#8b5cf6",
+      thumbTs: "00:15",
+      privacy: "unlisted",
+      clipStart: "00:00:00",
+      clipEnd: "00:01:00",
+      verticalLayout: "blur_bg",
+      aiEngine: "",
+      results: [],
+    },
     shortsCam: null,
     shortsGame: null,
     libSearch: "",
@@ -141,6 +162,7 @@
     else if (state.page === "library") renderLibraryPage();
     else if (state.page === "blur") renderBlurPage();
     else if (state.page === "studio") renderStudioPage();
+    else if (state.page === "publish") renderPublishPage();
     else if (state.page === "settings") renderSettingsPage();
     else if (state.page === "logs") renderLogsPage();
     updateNavBadges();
@@ -1857,6 +1879,312 @@
     `;
   }
 
+  // ==================== PAGE 5b: SOCIAL AUTO-POSTING & LOCAL AI ====================
+  function renderPublishPage() {
+    const root = $("#page-publish");
+    const pub = state.pub;
+    if (!pub.videoPath && state.studioFile) pub.videoPath = state.studioFile;
+    if (!state.localAi) {
+      callBackend("getLocalAiStatus").then((raw) => {
+        try {
+          state.localAi = JSON.parse(raw || "{}");
+          if (state.page === "publish") renderPublishPage();
+        } catch {}
+      });
+    }
+    const lai = state.localAi || { engine_label: "Встроенный оффлайн AI (без API)", ollama_installed: false, ollama_running: false, models: [] };
+    const hasPlat = (id) => pub.platforms.includes(id);
+
+    root.innerHTML = `
+      <div class="page-header">
+        <div>
+          <div class="page-title">Автопостинг в соцсети</div>
+          <div class="page-sub">Публикация полноценных роликов, нарезок и вертикальных Shorts/TikTok с локальным AI (обложка, заголовок, описание, хэштеги)</div>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-soft" id="btnPubAiAll">${iconSvg("sparkles", 15)}<span>Сгенерировать всё (AI)</span></button>
+          <button class="btn btn-primary" id="btnPubRunNow">${iconSvg("upload", 15)}<span>Опубликовать (${pub.platforms.length})</span></button>
+        </div>
+      </div>
+
+      <div class="local-ai-banner">
+        <div>
+          <div style="font-size:13px;font-weight:700;color:#4ade80;">🤖 Локальный AI активен: ${esc(pub.aiEngine || lai.engine_label)}</div>
+          <div style="font-size:12px;color:var(--text-secondary);">
+            ${lai.ollama_running && lai.models?.length
+              ? `Найдены локальные модели Ollama: ${esc(lai.models.slice(0, 4).join(", "))} — всё работает на 100% бесплатно без API!`
+              : (lai.ollama_installed
+                ? "Ollama установлен! Нажмите «Скачать qwen2.5:3b», чтобы включить мощную локальную нейросеть (или используйте встроенный оффлайн AI)."
+                : "Встроенный оффлайн AI уже работает без ключей. Для ещё более умных текстов можно бесплатно поставить Ollama (ollama.com).")}
+          </div>
+        </div>
+        <div class="input-row">
+          ${lai.ollama_installed
+            ? `<button class="btn btn-soft btn-sm" id="btnPubPullOllama">${iconSvg("download", 14)}<span>Скачать qwen2.5:3b</span></button>`
+            : `<button class="btn btn-subtle btn-sm" id="btnPubGetOllama">Скачать Ollama (бесплатно)</button>`}
+        </div>
+      </div>
+
+      <div class="pub-grid">
+        <!-- LEFT COLUMN: VIDEO, FORMAT, PLATFORMS, TEXTS -->
+        <div style="display:flex;flex-direction:column;gap:14px;">
+          <div class="card">
+            <div class="field" style="margin-bottom:14px;">
+              <label>1. Видеофайл для публикации</label>
+              <div class="input-row">
+                <input class="input" id="pubVidInp" value="${esc(pub.videoPath)}" placeholder="Выберите запись или готовый ролик..." />
+                <button class="btn btn-subtle" id="btnPubPickVid">${iconSvg("folder", 15)}<span>Выбрать</span></button>
+              </div>
+            </div>
+
+            <div class="field" style="margin-bottom:14px;">
+              <label>2. Формат публикации</label>
+              <div class="pub-format-cards" id="pubFormatCards">
+                <button type="button" class="pub-format-card ${pub.formatMode === "full" ? "active" : ""}" data-fmt="full">
+                  <div style="font-size:18px;">🎬</div>
+                  <div class="pub-format-title">Полноценный ролик</div>
+                  <div class="pub-format-sub">Горизонтальный 16:9 целиком</div>
+                </button>
+                <button type="button" class="pub-format-card ${pub.formatMode === "clip" ? "active" : ""}" data-fmt="clip">
+                  <div style="font-size:18px;">✂</div>
+                  <div class="pub-format-title">Нарезка / Хайлайт</div>
+                  <div class="pub-format-sub">Вырезать отрезок От — До</div>
+                </button>
+                <button type="button" class="pub-format-card ${pub.formatMode === "vertical" ? "active" : ""}" data-fmt="vertical">
+                  <div style="font-size:18px;">📱</div>
+                  <div class="pub-format-title">Вертикальный 9:16</div>
+                  <div class="pub-format-sub">Авто-рендер Shorts / TikTok</div>
+                </button>
+              </div>
+            </div>
+
+            ${pub.formatMode === "clip" ? `
+              <div class="form-grid-2" style="margin-bottom:14px;">
+                <div class="field"><label>Начало нарезки</label><input class="input mono" id="pubClipS" value="${esc(pub.clipStart)}" placeholder="00:00:00" /></div>
+                <div class="field"><label>Конец нарезки</label><input class="input mono" id="pubClipE" value="${esc(pub.clipEnd)}" placeholder="00:01:00" /></div>
+              </div>
+            ` : pub.formatMode === "vertical" ? `
+              <div class="field" style="margin-bottom:14px;">
+                <label>Компоновка вертикального видео 9:16 (1080×1920)</label>
+                <select class="input-select" id="pubVertLayout">
+                  <option value="blur_bg" ${pub.verticalLayout === "blur_bg" ? "selected" : ""}>Видео по центру + размытый фон (универсально)</option>
+                  <option value="split" ${pub.verticalLayout === "split" ? "selected" : ""}>Вебка сверху + Геймплей снизу</option>
+                  <option value="pip_circle" ${pub.verticalLayout === "pip_circle" ? "selected" : ""}>Круглая вебка PiP поверх геймплея</option>
+                </select>
+              </div>
+            ` : ""}
+
+            <div class="field">
+              <label>3. Куда выкладываем (можно выбрать несколько)</label>
+              <div class="pub-plat-grid" id="pubPlatGrid">
+                <button type="button" class="pub-plat-btn ${hasPlat("youtube") ? "active" : ""}" data-plat="youtube">▶ YouTube</button>
+                <button type="button" class="pub-plat-btn ${hasPlat("tiktok") ? "active" : ""}" data-plat="tiktok">🎵 TikTok</button>
+                <button type="button" class="pub-plat-btn ${hasPlat("telegram") ? "active" : ""}" data-plat="telegram">✈ Telegram</button>
+                <button type="button" class="pub-plat-btn ${hasPlat("vk") ? "active" : ""}" data-plat="vk">💙 VK / Клипы</button>
+                <button type="button" class="pub-plat-btn ${hasPlat("discord") ? "active" : ""}" data-plat="discord">💬 Discord</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="input-row" style="justify-content:space-between;margin-bottom:10px;">
+              <strong style="font-size:14px;">4. Заголовок, описание и хэштеги</strong>
+              <button class="btn btn-soft btn-sm" id="btnPubAiText">${iconSvg("sparkles", 13)}<span>Сгенерировать AI</span></button>
+            </div>
+            <div class="field" style="margin-bottom:10px;">
+              <label>Заголовок ролика</label>
+              <input class="input" id="pubTitleInp" value="${esc(pub.title)}" placeholder="Введите заголовок или нажмите «Сгенерировать AI»..." />
+            </div>
+            ${pub.titleVariants.length ? `
+              <div class="split-pills" style="margin-bottom:10px;">
+                ${pub.titleVariants.map((t, i) => `<button type="button" class="split-pill act-pub-tvar" data-idx="${i}" style="font-size:11.5px;">${esc(t)}</button>`).join("")}
+              </div>
+            ` : ""}
+            <div class="field" style="margin-bottom:10px;">
+              <label>Описание (с таймкодами)</label>
+              <textarea class="input" id="pubDescInp" style="min-height:110px;resize:vertical;font-family:inherit;">${esc(pub.description)}</textarea>
+            </div>
+            <div class="field" style="margin-bottom:10px;">
+              <label>Хэштеги</label>
+              <input class="input" id="pubTagsInp" value="${esc(pub.hashtags)}" placeholder="#shorts #twitch #игры #нарезка" />
+              <div class="split-pills" id="pubTagQuick">
+                ${["#shorts", "#tiktok", "#reels", "#twitch", "#стрим", "#нарезка", "#хайлайты", "#игры", "#cs2", "#gta"].map((tg) =>
+                  `<button type="button" class="split-pill" data-tag="${tg}" style="padding:3px 9px;font-size:11.5px;">+ ${tg}</button>`
+                ).join("")}
+              </div>
+            </div>
+            <div class="input-row" style="justify-content:space-between;flex-wrap:wrap;">
+              <div class="input-row">
+                <span style="font-size:12px;color:var(--text-muted);">Доступ YouTube:</span>
+                <select class="input-select compact" id="pubPrivacy">
+                  <option value="public" ${pub.privacy === "public" ? "selected" : ""}>Открытый (Public)</option>
+                  <option value="unlisted" ${pub.privacy === "unlisted" ? "selected" : ""}>По ссылке (Unlisted)</option>
+                  <option value="private" ${pub.privacy === "private" ? "selected" : ""}>Личный (Private)</option>
+                </select>
+              </div>
+              <button class="btn btn-subtle btn-sm" id="btnPubCopyAll">${iconSvg("copy", 13)}<span>Копировать весь текст</span></button>
+            </div>
+          </div>
+        </div>
+
+        <!-- RIGHT COLUMN: COVER GENERATOR + PUBLISH RESULTS -->
+        <div style="display:flex;flex-direction:column;gap:14px;">
+          <div class="card">
+            <div class="input-row" style="justify-content:space-between;margin-bottom:10px;">
+              <strong style="font-size:14px;">5. Обложка 1280×720 (Превью)</strong>
+              <button class="btn btn-subtle btn-sm" id="btnPubPickCover">${iconSvg("image", 13)}<span>Своя картинка</span></button>
+            </div>
+            <div class="pub-cover-box" style="margin-bottom:12px;">
+              ${pub.thumbPath
+                ? `<img src="${mediaUrl(pub.thumbPath)}&t=${Date.now()}" alt="Обложка" />`
+                : `<div style="text-align:center;padding:20px;">${iconSvg("image", 32)}<div style="font-size:12.5px;margin-top:6px;">Нажмите «Сгенерировать обложку» ниже</div></div>`}
+            </div>
+            <div class="field" style="margin-bottom:8px;"><label>Заголовок на обложке</label><input class="input" id="pubThHead" value="${esc(pub.thumbHeadline)}" /></div>
+            <div class="form-grid-2" style="margin-bottom:10px;">
+              <div class="field"><label>Плашка сверху</label><input class="input" id="pubThSub" value="${esc(pub.thumbSubtitle)}" /></div>
+              <div class="field"><label>Кадр (таймкод)</label><input class="input mono" id="pubThTs" value="${esc(pub.thumbTs)}" placeholder="00:15" /></div>
+            </div>
+            <div class="input-row" style="justify-content:space-between;margin-bottom:10px;">
+              <div class="color-swatch-row">
+                ${["#8b5cf6", "#ef4444", "#22c55e", "#f59e0b", "#3b82f6", "#ec4899"].map((col) =>
+                  `<button type="button" class="color-swatch ${pub.thumbAccent === col ? "active" : ""}" data-pcol="${col}" style="background:${col};"></button>`
+                ).join("")}
+              </div>
+              <button class="btn btn-primary btn-sm" id="btnPubGenCover">${iconSvg("sparkles", 14)}<span>Сгенерировать обложку</span></button>
+            </div>
+          </div>
+
+          ${pub.results.length ? `
+            <div class="card">
+              <strong style="font-size:13.5px;display:block;margin-bottom:8px;">Результаты публикации</strong>
+              <div class="hl-list">
+                ${pub.results.map((r) => `
+                  <div class="hl-row">
+                    <span class="diag-pill ${r.ok ? "" : "off"}" style="${r.ok ? "" : "color:#f87171;"}">${esc(r.platform)}</span>
+                    <span style="flex:1;font-size:12px;color:var(--text-secondary);">${esc(r.message)}</span>
+                  </div>
+                `).join("")}
+              </div>
+            </div>
+          ` : ""}
+        </div>
+      </div>
+    `;
+
+    const syncPubInputs = () => {
+      pub.videoPath = $("#pubVidInp")?.value.trim() || pub.videoPath;
+      pub.title = $("#pubTitleInp")?.value || "";
+      pub.description = $("#pubDescInp")?.value || "";
+      pub.hashtags = $("#pubTagsInp")?.value || "";
+      pub.privacy = $("#pubPrivacy")?.value || "unlisted";
+      pub.thumbHeadline = $("#pubThHead")?.value || "";
+      pub.thumbSubtitle = $("#pubThSub")?.value || "";
+      pub.thumbTs = $("#pubThTs")?.value || "00:15";
+      if ($("#pubClipS")) pub.clipStart = $("#pubClipS").value;
+      if ($("#pubClipE")) pub.clipEnd = $("#pubClipE").value;
+      if ($("#pubVertLayout")) pub.verticalLayout = $("#pubVertLayout").value;
+    };
+
+    $("#btnPubPullOllama")?.addEventListener("click", () => callBackend("pullOllamaModel", state.config.local_ai_model || "qwen2.5:3b"));
+    $("#btnPubGetOllama")?.addEventListener("click", () => callBackend("openExternalUrl", "https://ollama.com/download"));
+    $("#btnPubPickVid").onclick = async () => {
+      const p = await callBackend("pickFile", "Видео (*.mp4 *.mkv *.ts *.mov *.webm)");
+      if (p) { pub.videoPath = p; renderPublishPage(); }
+    };
+    $("#btnPubPickCover").onclick = async () => {
+      const p = await callBackend("pickFile", "Картинки (*.jpg *.jpeg *.png *.webp)");
+      if (p) { pub.thumbPath = p; renderPublishPage(); }
+    };
+    $("#pubFormatCards").querySelectorAll(".pub-format-card").forEach((b) => {
+      b.onclick = () => { syncPubInputs(); pub.formatMode = b.dataset.fmt; renderPublishPage(); };
+    });
+    $("#pubPlatGrid").querySelectorAll(".pub-plat-btn").forEach((b) => {
+      b.onclick = () => {
+        syncPubInputs();
+        const pl = b.dataset.plat;
+        if (pub.platforms.includes(pl)) pub.platforms = pub.platforms.filter((x) => x !== pl);
+        else pub.platforms.push(pl);
+        renderPublishPage();
+      };
+    });
+    root.querySelectorAll(".act-pub-tvar").forEach((b) => {
+      b.onclick = () => {
+        pub.title = pub.titleVariants[Number(b.dataset.idx)] || pub.title;
+        if ($("#pubTitleInp")) $("#pubTitleInp").value = pub.title;
+      };
+    });
+    $("#pubTagQuick").querySelectorAll("button").forEach((b) => {
+      b.onclick = () => {
+        const tg = b.dataset.tag;
+        const cur = $("#pubTagsInp").value.trim();
+        if (!cur.toLowerCase().includes(tg.toLowerCase())) {
+          $("#pubTagsInp").value = (cur ? `${cur} ${tg}` : tg);
+          pub.hashtags = $("#pubTagsInp").value;
+        }
+      };
+    });
+    root.querySelectorAll("[data-pcol]").forEach((s) => {
+      s.onclick = () => { syncPubInputs(); pub.thumbAccent = s.dataset.pcol; renderPublishPage(); };
+    });
+
+    const genCover = async () => {
+      syncPubInputs();
+      if (!pub.videoPath) return showToast("Обложка", "Сначала выберите видеофайл", "error");
+      const raw = await callBackend("createThumbnail", JSON.stringify({
+        video_path: pub.videoPath,
+        timestamp_sec: parseSec(pub.thumbTs) ?? 15,
+        headline: pub.thumbHeadline.trim() || pub.title.slice(0, 32) || "ЛУЧШИЙ МОМЕНТ",
+        subtitle: pub.thumbSubtitle.trim() || "TWITCH HIGHLIGHTS",
+        accent_color: pub.thumbAccent,
+      }));
+      try {
+        const res = JSON.parse(raw || "{}");
+        if (res.ok && res.output_path) { pub.thumbPath = res.output_path; renderPublishPage(); }
+      } catch {}
+    };
+    $("#btnPubGenCover").onclick = genCover;
+
+    const genAiPkg = (alsoCover) => {
+      syncPubInputs();
+      if (!pub.videoPath) return showToast("Автопостинг AI", "Сначала выберите видеофайл", "error");
+      pub._autoGenCoverNext = !!alsoCover;
+      callBackend("runAiSuiteTask", "publish_package", JSON.stringify({
+        video_path: pub.videoPath,
+        format_mode: pub.formatMode,
+        platforms: pub.platforms,
+      }));
+      showToast("Локальный AI", "Генерируем заголовок, описание и хэштеги...", "info");
+    };
+    $("#btnPubAiText").onclick = () => genAiPkg(false);
+    $("#btnPubAiAll").onclick = () => genAiPkg(true);
+
+    $("#btnPubCopyAll").onclick = () => {
+      syncPubInputs();
+      navigator.clipboard?.writeText(`${pub.title}\n\n${pub.description}\n\n${pub.hashtags}`.trim());
+      showToast("Скопировано", "Заголовок, описание и хэштеги в буфере обмена", "success");
+    };
+
+    $("#btnPubRunNow").onclick = () => {
+      syncPubInputs();
+      if (!pub.videoPath) return showToast("Автопостинг", "Выберите видеофайл", "error");
+      if (!pub.platforms.length) return showToast("Автопостинг", "Выберите хотя бы одну соцсеть", "error");
+      navigator.clipboard?.writeText(`${pub.title}\n\n${pub.description}\n\n${pub.hashtags}`.trim());
+      callBackend("executeAutoPublish", JSON.stringify({
+        video_path: pub.videoPath,
+        thumb_path: pub.thumbPath,
+        format_mode: pub.formatMode,
+        platforms: pub.platforms,
+        title: pub.title || pub.videoPath.split(/[\\/]/).pop(),
+        description: pub.description,
+        hashtags: pub.hashtags,
+        privacy: pub.privacy,
+        clip_start: parseSec(pub.clipStart) ?? 0,
+        clip_end: parseSec(pub.clipEnd) ?? 60,
+        vertical_layout: pub.verticalLayout,
+      }));
+    };
+  }
+
   // ==================== PAGE 6: SETTINGS ====================
   function renderSettingsPage() {
     const root = $("#page-settings");
@@ -2012,9 +2340,17 @@
             <div class="field"><label>API Key</label><input type="password" class="input" id="cfgLlmKey" value="${esc(c.llm_api_key || "")}" placeholder="sk-..." /></div>
             <div class="field"><label>Модель</label><input class="input" id="cfgLlmModel" value="${esc(c.llm_model || "gpt-4o-mini")}" /></div>
           </div>
-          <div class="field">
+          <div class="field" style="margin-bottom:12px;">
             <label>AI Brand Voice — персональный стиль вашего канала (используется во всех AI-генераторах)</label>
             <input class="input" id="cfgBrandVoice" value="${esc(c.ai_brand_voice || "")}" placeholder="Дерзкий молодёжный стиль, короткие кликбейтные заголовки, эмодзи 🔥💀, аудитория CS2/GTA..." />
+          </div>
+          <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:6px;">
+            <div class="setting-row-title" style="margin-bottom:6px;">Ключи автопостинга YouTube и VK (опционально)</div>
+            <div class="form-grid-3">
+              <div class="field"><label>YouTube client_secrets.json</label><input class="input" id="cfgYtSecrets" value="${esc(c.youtube_client_secrets || "")}" placeholder="Путь к OAuth JSON..." /></div>
+              <div class="field"><label>VK Access Token</label><input type="password" class="input" id="cfgVkTok" value="${esc(c.vk_access_token || "")}" placeholder="vk1.a...." /></div>
+              <div class="field"><label>VK Group ID (опц.)</label><input class="input" id="cfgVkGid" value="${esc(c.vk_group_id || "")}" placeholder="123456789" /></div>
+            </div>
           </div>
         </div>
       </div>
@@ -2174,6 +2510,9 @@
       llm_api_key: $("#cfgLlmKey").value.trim(),
       llm_model: $("#cfgLlmModel").value.trim() || "gpt-4o-mini",
       ai_brand_voice: $("#cfgBrandVoice")?.value.trim() || "",
+      youtube_client_secrets: $("#cfgYtSecrets")?.value.trim() || "",
+      vk_access_token: $("#cfgVkTok")?.value.trim() || "",
+      vk_group_id: $("#cfgVkGid")?.value.trim() || "",
       telegram_bot_token: $("#cfgTgTok").value.trim(),
       telegram_chat_id: $("#cfgTgChat").value.trim(),
       telegram_bot_enabled: $("#cfgTgBot").checked,
@@ -3284,6 +3623,40 @@
       else if (t === "social_post") { state.aiSocialPost = d.text || ""; if (state.page === "studio") renderStudioInspector(); }
       else if (t === "virality_critique") { state.aiCritique = d; if (state.page === "studio") renderStudioInspector(); }
       else if (t === "chat_sentiment") { state.aiChatSentiment = d; if (state.page === "studio") renderStudioInspector(); }
+      else if (t === "publish_package" && d.ok) {
+        const pub = state.pub;
+        pub.aiEngine = d.ai_engine || "";
+        pub.titleVariants = d.titles || [];
+        pub.title = pub.titleVariants[0] || pub.title;
+        pub.description = d.description || pub.description;
+        pub.hashtags = d.hashtags || pub.hashtags;
+        pub.thumbHeadline = d.thumb_headline || pub.thumbHeadline;
+        pub.thumbSubtitle = d.thumb_subtitle || pub.thumbSubtitle;
+        const needCover = !!pub._autoGenCoverNext;
+        pub._autoGenCoverNext = false;
+        if (state.page === "publish") renderPublishPage();
+        showToast("AI Пакет готов", `Движок: ${pub.aiEngine}`, "success");
+        if (needCover && pub.videoPath) {
+          callBackend("createThumbnail", JSON.stringify({
+            video_path: pub.videoPath,
+            timestamp_sec: parseSec(pub.thumbTs) ?? 15,
+            headline: pub.thumbHeadline,
+            subtitle: pub.thumbSubtitle,
+            accent_color: pub.thumbAccent,
+          })).then((raw) => {
+            try {
+              const res = JSON.parse(raw || "{}");
+              if (res.ok && res.output_path) { pub.thumbPath = res.output_path; if (state.page === "publish") renderPublishPage(); }
+            } catch {}
+          });
+        }
+      }
+    } else if (type === "local_ai_status") {
+      state.localAi = data || null;
+      if (state.page === "publish") renderPublishPage();
+    } else if (type === "publish_result") {
+      state.pub.results = data?.results || [];
+      if (state.page === "publish") renderPublishPage();
     } else if (type === "catalog") {
       state.catalogLoading = false;
       state.catalogError = data.error || "";
