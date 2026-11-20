@@ -456,7 +456,7 @@ class LiveRecorderWorker(QThread):
 
         if self.channel.segment_minutes > 0:
             seg_sec = self.channel.segment_minutes * 60
-            if not use_realtime_blur and ext == "mp4":
+            if not use_realtime_blur and ext == "mp4" and self.channel.platform == "twitch":
                 ff_cmd.extend(["-bsf:a", "aac_adtstoasc"])
             ff_cmd.extend([
                 "-f", "segment", "-segment_time", str(seg_sec),
@@ -466,7 +466,7 @@ class LiveRecorderWorker(QThread):
                 ff_cmd.extend(["-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof"])
             self.log_message.emit(f"[{uname}] Авто-разбивка записи: по {self.channel.segment_minutes} мин.")
         elif ext == "mp4":
-            if not use_realtime_blur:
+            if not use_realtime_blur and self.channel.platform == "twitch":
                 ff_cmd.extend(["-bsf:a", "aac_adtstoasc"])
             ff_cmd.extend(["-movflags", "+frag_keyframe+empty_moov+default_base_moof"])
 
@@ -511,7 +511,8 @@ class LiveRecorderWorker(QThread):
                     if self._stop_requested:
                         return
                     idle_s = time.time() - last_progress_ts[0]
-                    limit_s = 50.0 if started else 45.0
+                    # 120s during active stream so 60-90s Twitch ad-breaks (--twitch-disable-ads) never trigger false restarts
+                    limit_s = 120.0 if started else 60.0
                     if idle_s >= limit_s:
                         self.log_message.emit(
                             f"[{uname}] [Watchdog] Поток завис ({int(idle_s)}с без данных) — перезапуск соединения..."

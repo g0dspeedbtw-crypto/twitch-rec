@@ -639,6 +639,29 @@ class SleepInhibitor:
         self._active = False
         self._proc: Optional[subprocess.Popen] = None
 
+    @property
+    def is_active(self) -> bool:
+        return self._active
+
+    @staticmethod
+    def trigger_system_sleep() -> Tuple[bool, str]:
+        """Put macOS / Windows / Linux into sleep mode cleanly after recordings finish."""
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["pmset", "sleepnow"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True, "macOS переходит в режим сна"
+            if os.name == "nt":
+                subprocess.Popen(
+                    ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                return True, "Windows переходит в режим сна"
+            subprocess.Popen(["systemctl", "suspend"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True, "Система переходит в режим сна"
+        except Exception as exc:
+            return False, str(exc)
+
     def set_active(self, active: bool) -> None:
         active = bool(active)
         if active == self._active:

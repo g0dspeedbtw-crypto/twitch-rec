@@ -42,7 +42,7 @@ def get_data_dir() -> Path:
 
 BASE_DIR = get_resource_dir()
 DATA_DIR = get_data_dir()
-APP_VERSION = "3.1.0"
+APP_VERSION = "3.2.0"
 DEFAULT_GITHUB_REPO = "g0dspeedbtw-crypto/twitch-rec"
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -320,6 +320,8 @@ class AppConfig:
     # System & Tray (#19, #30, #31)
     minimize_to_tray: bool = True
     start_with_windows: bool = False
+    prevent_sleep_while_recording: bool = True
+    auto_sleep_after_finish: bool = False
     marker_hotkey: str = "F9"
     # Notifications & Remote Control (#32, #41)
     telegram_bot_token: str = ""

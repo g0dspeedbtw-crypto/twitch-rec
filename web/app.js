@@ -149,6 +149,15 @@
     if (state.page === "settings" && page !== "settings") {
       state.settingsDraft = null;
     }
+    if (state.page === "studio" && page !== "studio") {
+      const mon = $("#studioMonitor");
+      if (mon) {
+        mon.pause();
+        mon.removeAttribute("src");
+        mon.load();
+      }
+      _studioLoadedSrc = "";
+    }
     state.page = page;
     document.querySelectorAll(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
     document.querySelectorAll(".page").forEach((p) => p.classList.toggle("active", p.id === `page-${page}`));
@@ -200,14 +209,19 @@
           <div class="page-sub">Каналов: ${state.channels.length} · В эфире: ${onlineCnt} · Идёт запись: ${recCnt}</div>
         </div>
         <div class="header-actions">
-          <label class="switch-inline" style="background:rgba(255,255,255,0.03);border:1px solid var(--border);padding:7px 12px;border-radius:10px;">
+          <label class="switch-inline" title="Автоматически начинать запись, когда стример выходит в эфир" style="background:rgba(255,255,255,0.03);border:1px solid var(--border);padding:7px 12px;border-radius:10px;">
             <input type="checkbox" id="liveAutoMon" ${state.config.auto_monitor_enabled ? "checked" : ""}/>
             <span class="switch-track"></span>
             <span>Автомониторинг</span>
           </label>
+          <label class="switch-inline" title="Во время записи ноутбук не уснёт, а после завершения всех записей и блюра автоматически уйдёт в сон" style="background:rgba(255,255,255,0.03);border:1px solid var(--border);padding:7px 12px;border-radius:10px;">
+            <input type="checkbox" id="liveAutoSleep" ${state.config.auto_sleep_after_finish ? "checked" : ""}/>
+            <span class="switch-track"></span>
+            <span>🌙 Сон после записи</span>
+          </label>
           <button class="btn btn-subtle" id="btnCheckNow">${iconSvg("refresh", 15)}<span>Обновить</span></button>
-          <button class="btn btn-success" id="btnRecAll">${iconSvg("record", 13)}<span>Записать всех</span></button>
-          <button class="btn btn-danger" id="btnStopAll">${iconSvg("stop", 13)}<span>Стоп всем</span></button>
+          <button class="btn ${onlineCnt > 0 ? "btn-success" : "btn-subtle"}" id="btnRecAll" ${onlineCnt === 0 ? "disabled" : ""}>${iconSvg("record", 13)}<span>Записать всех${onlineCnt > 0 ? ` (${onlineCnt})` : ""}</span></button>
+          <button class="btn ${recCnt > 0 ? "btn-danger" : "btn-subtle"}" id="btnStopAll" ${recCnt === 0 ? "disabled" : ""}>${iconSvg("stop", 13)}<span>Стоп всем${recCnt > 0 ? ` (${recCnt})` : ""}</span></button>
         </div>
       </div>
 
@@ -261,6 +275,13 @@
       if (res) {
         try { state.config = JSON.parse(res); } catch {}
       }
+    };
+    $("#liveAutoSleep").onchange = async (e) => {
+      const res = await callBackend("setAutoSleepAfterFinish", e.target.checked);
+      if (res) {
+        try { state.config = JSON.parse(res); } catch {}
+      }
+      showToast("Ночной режим сна", e.target.checked ? "Компьютер уснёт сам, когда все записи и блюр завершатся" : "Авто-сон после записи выключен", "info");
     };
     $("#btnCheckNow").onclick = () => { callBackend("checkChannels"); showToast("Проверка эфиров", "Обновляем статусы каналов...", "info"); };
     $("#btnRecAll").onclick = () => callBackend("recordAllOnline");
@@ -656,7 +677,8 @@
               <div class="media-actions">
                 <button class="btn btn-soft btn-sm act-to-blur" data-path="${esc(f.path)}">${iconSvg("blur", 13)}<span>Блюр</span></button>
                 <button class="btn btn-subtle btn-sm act-to-studio" data-path="${esc(f.path)}">${iconSvg("scissors", 13)}<span>Монтаж</span></button>
-                <button class="btn-icon act-tg-pub" data-path="${esc(f.path)}" data-name="${esc(f.name)}" title="Опубликовать в Telegram">${iconSvg("bell", 14)}</button>
+                <button class="btn-icon act-to-pub" data-path="${esc(f.path)}" title="Отправить в Автопостинг (YouTube / TikTok / Telegram)">${iconSvg("upload", 14)}</button>
+                <button class="btn-icon act-tg-pub" data-path="${esc(f.path)}" data-name="${esc(f.name)}" title="Быстро отправить в Telegram">${iconSvg("bell", 14)}</button>
                 <button class="btn-icon act-reveal" data-path="${esc(f.path)}" title="Показать в проводнике">${iconSvg("folder", 14)}</button>
                 <button class="btn-icon danger act-rm" data-path="${esc(f.path)}" data-name="${esc(f.name)}" title="Удалить">${iconSvg("trash", 14)}</button>
               </div>
@@ -676,7 +698,10 @@
       el.onclick = () => { state.manualBlurFile = el.dataset.path; switchPage("blur"); };
     });
     wrap.querySelectorAll(".act-to-studio").forEach((el) => {
-      el.onclick = () => { state.studioFile = el.dataset.path; switchPage("studio"); };
+      el.onclick = () => { switchPage("studio"); loadStudioVideo(el.dataset.path); };
+    });
+    wrap.querySelectorAll(".act-to-pub").forEach((el) => {
+      el.onclick = () => { state.pub.videoPath = el.dataset.path; switchPage("publish"); };
     });
     wrap.querySelectorAll(".act-reveal").forEach((el) => {
       el.onclick = () => callBackend("openInExplorer", el.dataset.path);
@@ -1034,6 +1059,7 @@
           </div>
         </div>
         <div class="input-row" style="flex-wrap:wrap;">
+          <button class="btn btn-soft btn-sm" id="btnStToPublish">${iconSvg("upload", 14)}<span>В Автопостинг</span></button>
           <button class="btn btn-subtle btn-sm" id="btnStPick">${iconSvg("folder", 14)}<span>Другое видео</span></button>
           <button class="btn btn-subtle btn-sm" id="btnStReveal">${iconSvg("grid", 14)}<span>В папке</span></button>
           <button class="btn btn-danger-ghost btn-sm" id="btnStCloseFile">${iconSvg("x", 14)}<span>Закрыть</span></button>
@@ -1110,6 +1136,7 @@
       <div id="studioJobsDock" style="margin-top:16px;"></div>
     `;
 
+    $("#btnStToPublish").onclick = () => { state.pub.videoPath = state.studioFile; switchPage("publish"); };
     $("#btnStPick").onclick = async () => {
       const p = await callBackend("pickFile", "Видео (*.mp4 *.mkv *.ts *.mov *.webm)");
       if (p) loadStudioVideo(p);
@@ -2418,6 +2445,14 @@
           <label class="switch-inline"><input type="checkbox" id="cfgAutostart" ${c.start_with_windows ? "checked" : ""}/><span class="switch-track"></span></label>
         </div>
         <div class="setting-row">
+          <div><div class="setting-row-title">Не давать ноутбуку засыпать во время записи и блюра</div><div class="setting-row-desc">Блокирует сон системы (macOS caffeinate / Windows), пока идёт запись, и снимает блокировку сразу после завершения</div></div>
+          <label class="switch-inline"><input type="checkbox" id="cfgPreventSleep" ${c.prevent_sleep_while_recording !== false ? "checked" : ""}/><span class="switch-track"></span></label>
+        </div>
+        <div class="setting-row">
+          <div><div class="setting-row-title">Усыпить компьютер после завершения всех записей (ночной режим)</div><div class="setting-row-desc">Когда все активные стримы и блюр закончатся, компьютер автоматически уйдёт в сон через 30 сек</div></div>
+          <label class="switch-inline"><input type="checkbox" id="cfgAutoSleepAfter" ${c.auto_sleep_after_finish ? "checked" : ""}/><span class="switch-track"></span></label>
+        </div>
+        <div class="setting-row">
           <div><div class="setting-row-title">Глобальная клавиша маркера хайлайта</div><div class="setting-row-desc">Работает на Windows и macOS даже поверх полноэкранных игр и браузера</div></div>
           <select class="input-select compact" id="cfgHotkey">
             ${Array.from({ length: 12 }, (_, i) => `F${i + 1}`).map((k) => `<option ${c.marker_hotkey === k ? "selected" : ""}>${k}</option>`).join("")}
@@ -2526,6 +2561,8 @@
       compact_cards: $("#cfgCompact").checked,
       minimize_to_tray: $("#cfgTray").checked,
       start_with_windows: $("#cfgAutostart").checked,
+      prevent_sleep_while_recording: $("#cfgPreventSleep").checked,
+      auto_sleep_after_finish: $("#cfgAutoSleepAfter").checked,
       marker_hotkey: $("#cfgHotkey").value,
       cloud_sync_path: $("#cfgCloudPath")?.value.trim() || "",
       cloud_gist_token: $("#cfgGistTok")?.value.trim() || "",
@@ -3114,7 +3151,12 @@
       renderBsZones();
     };
 
-    const closeModal = () => { vid.pause(); $("#blurModal").classList.add("hidden"); };
+    const closeModal = () => {
+      vid.pause();
+      vid.removeAttribute("src");
+      vid.load();
+      $("#blurModal").classList.add("hidden");
+    };
     $("#bsCloseBtn").onclick = closeModal;
     $("#bsCancelBtn").onclick = closeModal;
     $("#bsSaveBtn").onclick = async () => {
@@ -3483,9 +3525,11 @@
     $("#telCpu").textContent = `CPU ${Math.round(snap.cpu_pct || 0)}%`;
     $("#telGpu").textContent = snap.gpu_pct != null ? `GPU ${snap.gpu_pct}% · NVENC ${snap.nvenc_pct}%` : `RAM ${Math.round(snap.ram_pct || 0)}%`;
     const diskEl = $("#telDisk");
-    diskEl.textContent = state.activeGame
-      ? `🎮 Игра: ${state.activeGame} · ${(snap.disk_free_gb || 0).toFixed(0)} ГБ`
-      : `Свободно: ${(snap.disk_free_gb || 0).toFixed(1)} ГБ`;
+    diskEl.textContent = snap.sleep_inhibited
+      ? `☕ Анти-сон · ${(snap.disk_free_gb || 0).toFixed(1)} ГБ`
+      : (state.activeGame
+        ? `🎮 Игра: ${state.activeGame} · ${(snap.disk_free_gb || 0).toFixed(0)} ГБ`
+        : `Свободно: ${(snap.disk_free_gb || 0).toFixed(1)} ГБ`);
     const low = (snap.disk_free_gb || 0) < (state.config.min_free_gb || 15);
     diskEl.parentElement.classList.toggle("low", low);
     $("#telDiskBar").style.width = `${Math.min(100, Math.max(6, ((snap.disk_free_gb || 0) / 500) * 100))}%`;

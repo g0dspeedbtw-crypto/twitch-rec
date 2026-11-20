@@ -467,9 +467,13 @@ class AppBridge(QObject):
         self._res_monitor.stats_ready.connect(self._on_resource_stats)
         self._res_monitor.start()
 
-        # System sleep prevention during active recordings & renders
+        # System sleep prevention during active recordings & renders + auto-sleep after finish
         from app.services import SleepInhibitor
         self._sleep_inhibitor = SleepInhibitor()
+        self._had_active_work = False
+        self._sleep_timer = QTimer(self)
+        self._sleep_timer.setSingleShot(True)
+        self._sleep_timer.timeout.connect(self._execute_auto_sleep)
 
         # Global F9 Hotkey (#19)
         self._hotkey = GlobalHotkeyMonitor(self.config.marker_hotkey, self)
@@ -1619,7 +1623,7 @@ class AppBridge(QObject):
             "output_dir", "check_interval_sec", "encoder", "video_quality", "container",
             "default_segment_minutes", "vod_concurrent_fragments", "twitch_oauth_token", "proxy_url",
             "min_free_gb", "hard_disk_guard", "auto_cleanup_old", "max_age_days", "minimize_to_tray",
-            "start_with_windows", "marker_hotkey", "telegram_bot_token", "telegram_chat_id",
+            "start_with_windows", "prevent_sleep_while_recording", "auto_sleep_after_finish", "marker_hotkey", "telegram_bot_token", "telegram_chat_id",
             "telegram_bot_enabled", "discord_webhook_url", "notify_on_live", "notify_on_finish", "notify_on_blur",
             "max_concurrent_blurs", "night_render_enabled", "night_render_start",
             "night_render_end", "normalize_audio_default", "low_priority_render",
@@ -2283,9 +2287,48 @@ class AppBridge(QObject):
     def clearLogs(self) -> None:
         self.logs.clear()
 
+    @Slot(bool, result=str)
+    def setAutoSleepAfterFinish(self, enabled: bool) -> str:
+        self.config.auto_sleep_after_finish = bool(enabled)
+        self.config.save()
+        if not enabled and self._sleep_timer.isActive():
+            self._sleep_timer.stop()
+        self._log(f"[Сон] Авто-сон после завершения записей: {'ВКЛ' if enabled else 'ВЫКЛ'}")
+        return json.dumps(asdict(self.config), ensure_ascii=False)
+
+    @Slot()
+    def cancelPendingSleep(self) -> None:
+        if self._sleep_timer.isActive():
+            self._sleep_timer.stop()
+            self._log("[Сон] Переход в режим сна отменён пользователем.")
+            self._toast("Сон отменён", "Компьютер останется включённым", "info")
+
+    def _execute_auto_sleep(self) -> None:
+        if self.active_count() > 0:
+            return
+        self._sleep_inhibitor.release()
+        ok, msg = self._sleep_inhibitor.trigger_system_sleep()
+        self._log(f"[Сон] {msg}")
+
     # ------------------------------------------------------------------ Resource Stats, Game Mode, Hard Disk Guard & Shutdown
     def _on_resource_stats(self, snap: ResourceSnapshot) -> None:
-        self._sleep_inhibitor.set_active(self.active_count() > 0)
+        active_now = self.active_count() > 0
+        if active_now:
+            self._had_active_work = True
+            if self._sleep_timer.isActive():
+                self._sleep_timer.stop()
+            self._sleep_inhibitor.set_active(bool(getattr(self.config, "prevent_sleep_while_recording", True)))
+        else:
+            if self._sleep_inhibitor.is_active:
+                self._sleep_inhibitor.release()
+                self._log("[Сон] Все записи и задачи завершены — блокировка сна снята.")
+            if self._had_active_work:
+                self._had_active_work = False
+                if getattr(self.config, "auto_sleep_after_finish", False):
+                    self._log("[Сон] Все записи и блюр завершены — переход в режим сна через 30 сек...")
+                    self._toast("Ночной режим сна", "Все записи завершены! Компьютер уснёт через 30 сек.", "info")
+                    self._sleep_timer.start(30_000)
+
         self._disk_free_gb = float(snap.disk_free_gb or 0.0)
         prev_game = self._active_game
         self._active_game = snap.active_game or ""
@@ -2295,7 +2338,9 @@ class AppBridge(QObject):
             self._log(f"[Игровой режим] Игра ({prev_game}) закрыта — возобновление очереди GPU.")
             self._pump_blur_queue(force=False)
 
-        self._emit("resources", asdict(snap))
+        payload = asdict(snap)
+        payload["sleep_inhibited"] = self._sleep_inhibitor.is_active
+        self._emit("resources", payload)
         low_disk = snap.disk_free_gb < self.config.min_free_gb
         if low_disk and not self._disk_warned:
             self._disk_warned = True
@@ -2312,6 +2357,8 @@ class AppBridge(QObject):
         return len(self.live_recorders) + len(self.vod_workers) + len(self.blur_workers) + len(self.studio_workers)
 
     def shutdown(self) -> None:
+        if self._sleep_timer.isActive():
+            self._sleep_timer.stop()
         self._sleep_inhibitor.release()
         self.monitor_timer.stop()
         self.queue_timer.stop()
