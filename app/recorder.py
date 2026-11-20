@@ -343,6 +343,8 @@ class LiveRecorderWorker(QThread):
 
         sl_cmd = [*streamlink_cmd, "--stdout", "--hls-live-restart", "--retry-streams", "4", "--retry-max", "3"]
         if self.channel.platform == "twitch":
+            # Request Twitch Enhanced Broadcasting (HEVC / 1440p60 / high-bitrate 1080p60) when available
+            sl_cmd.append("--twitch-supported-codecs=h265,h264")
             if self.channel.disable_ads:
                 sl_cmd.append("--twitch-disable-ads")
             if self.app_config.twitch_oauth_token.strip():

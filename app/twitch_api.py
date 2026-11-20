@@ -383,7 +383,7 @@ def capture_live_snapshot(
         try:
             cmd = [*streamlink_cmd, "--stream-url"]
             if ch.platform == "twitch":
-                cmd.append("--twitch-disable-ads")
+                cmd.extend(["--twitch-supported-codecs=h265,h264", "--twitch-disable-ads"])
             if proxy_url.strip():
                 cmd.extend(["--http-proxy", proxy_url.strip()])
             cmd.extend([ch.stream_url, f"{quality},best" if quality != "best" else "best"])
@@ -407,7 +407,7 @@ def capture_live_snapshot(
         try:
             sl_args = [*streamlink_cmd, "--stdout", "--quiet"]
             if ch.platform == "twitch":
-                sl_args.append("--twitch-disable-ads")
+                sl_args.extend(["--twitch-supported-codecs=h265,h264", "--twitch-disable-ads"])
             if proxy_url.strip():
                 sl_args.extend(["--http-proxy", proxy_url.strip()])
             sl_args.extend([ch.stream_url, f"{quality},best" if quality != "best" else "best"])

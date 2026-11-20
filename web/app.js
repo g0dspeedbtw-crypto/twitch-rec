@@ -2,7 +2,7 @@
 (function () {
   "use strict";
 
-  const QUALITIES = ["best", "1080p60", "1080p", "720p60", "720p", "480p", "360p", "worst"];
+  const QUALITIES = ["best", "1440p60", "1080p60", "1080p", "720p60", "720p", "480p", "360p", "worst"];
   const DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 
   const state = {
@@ -2105,7 +2105,9 @@
     const enc = state.diagnostics.active_encoder || "libx264";
     const encLabels = {
       h264_nvenc: "RTX NVENC готов",
+      hevc_nvenc: "RTX HEVC NVENC",
       h264_videotoolbox: "Apple VideoToolbox",
+      hevc_videotoolbox: "Apple HEVC VideoToolbox",
       h264_qsv: "Intel QSV готов",
       h264_amf: "AMD AMF готов",
     };

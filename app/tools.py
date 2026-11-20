@@ -126,9 +126,9 @@ def detect_available_encoders() -> List[str]:
         out = ""
 
     hw_candidates = (
-        ("h264_videotoolbox",)
+        ("h264_videotoolbox", "hevc_videotoolbox")
         if sys.platform == "darwin"
-        else ("h264_nvenc", "h264_qsv", "h264_amf")
+        else ("h264_nvenc", "hevc_nvenc", "h264_qsv", "h264_amf")
     )
     for enc in hw_candidates:
         if enc in out:
@@ -176,33 +176,90 @@ def escape_ffmpeg_filter_path(path: str) -> str:
     return s
 
 
-def encoder_ffmpeg_args(encoder: str, quality: int = 23, target_bitrate_kbps: Optional[int] = None) -> List[str]:
+def encoder_ffmpeg_args(encoder: str, quality: int = 20, target_bitrate_kbps: Optional[int] = None) -> List[str]:
     q = max(14, min(35, int(quality)))
     if target_bitrate_kbps and target_bitrate_kbps > 100:
         br = f"{int(target_bitrate_kbps)}k"
         max_br = f"{int(target_bitrate_kbps * 1.35)}k"
         buf_br = f"{int(target_bitrate_kbps * 2)}k"
         if encoder == "h264_videotoolbox":
-            return ["-c:v", "h264_videotoolbox", "-b:v", br, "-maxrate", max_br, "-bufsize", buf_br, "-allow_sw", "1", "-pix_fmt", "yuv420p"]
+            return [
+                "-c:v", "h264_videotoolbox", "-profile:v", "high", "-coder", "cabac",
+                "-spatial_aq", "1", "-b:v", br, "-maxrate", max_br, "-bufsize", buf_br,
+                "-allow_sw", "1", "-pix_fmt", "yuv420p",
+            ]
+        if encoder == "hevc_videotoolbox":
+            return [
+                "-c:v", "hevc_videotoolbox", "-spatial_aq", "1",
+                "-b:v", br, "-maxrate", max_br, "-bufsize", buf_br,
+                "-allow_sw", "1", "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
+            ]
         if encoder == "h264_nvenc":
-            return ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", br, "-maxrate", max_br, "-bufsize", buf_br, "-pix_fmt", "yuv420p"]
+            return [
+                "-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-profile:v", "high",
+                "-spatial-aq", "1", "-b:v", br, "-maxrate", max_br, "-bufsize", buf_br, "-pix_fmt", "yuv420p",
+            ]
+        if encoder == "hevc_nvenc":
+            return [
+                "-c:v", "hevc_nvenc", "-preset", "p5", "-tune", "hq",
+                "-spatial-aq", "1", "-b:v", br, "-maxrate", max_br, "-bufsize", buf_br, "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
+            ]
         if encoder == "h264_qsv":
-            return ["-c:v", "h264_qsv", "-preset", "fast", "-b:v", br, "-maxrate", max_br, "-bufsize", buf_br, "-pix_fmt", "yuv420p"]
+            return ["-c:v", "h264_qsv", "-preset", "medium", "-b:v", br, "-maxrate", max_br, "-bufsize", buf_br, "-pix_fmt", "yuv420p"]
         if encoder == "h264_amf":
-            return ["-c:v", "h264_amf", "-quality", "speed", "-b:v", br, "-maxrate", max_br, "-bufsize", buf_br, "-pix_fmt", "yuv420p"]
-        return ["-c:v", "libx264", "-preset", "veryfast", "-b:v", br, "-maxrate", max_br, "-bufsize", buf_br, "-pix_fmt", "yuv420p"]
+            return ["-c:v", "h264_amf", "-quality", "quality", "-b:v", br, "-maxrate", max_br, "-bufsize", buf_br, "-pix_fmt", "yuv420p"]
+        return ["-c:v", "libx264", "-preset", "faster", "-profile:v", "high", "-b:v", br, "-maxrate", max_br, "-bufsize", buf_br, "-pix_fmt", "yuv420p"]
 
     if encoder == "h264_videotoolbox":
-        # Apple Silicon / Intel macOS hardware encoder (q:v 1..100, higher=better)
-        vt_q = max(35, min(85, int(105 - q * 2)))
-        return ["-c:v", "h264_videotoolbox", "-q:v", str(vt_q), "-allow_sw", "1", "-pix_fmt", "yuv420p"]
+        # Apple Silicon / Intel macOS hardware encoder:
+        # Use high quality (q:v 78 at default q=20, 74 at legacy q=23) + High Profile + CABAC + Spatial AQ
+        # so re-encoded 1080p60/1440p60 streams stay visually lossless without generation loss.
+        vt_q = max(55, min(92, int(118 - q * 1.9)))
+        return [
+            "-c:v", "h264_videotoolbox",
+            "-q:v", str(vt_q),
+            "-profile:v", "high",
+            "-coder", "cabac",
+            "-spatial_aq", "1",
+            "-prio_speed", "0",
+            "-maxrate", "22000k",
+            "-bufsize", "44000k",
+            "-allow_sw", "1",
+            "-pix_fmt", "yuv420p",
+        ]
+    if encoder == "hevc_videotoolbox":
+        vt_q = max(58, min(94, int(120 - q * 1.9)))
+        return [
+            "-c:v", "hevc_videotoolbox",
+            "-q:v", str(vt_q),
+            "-spatial_aq", "1",
+            "-prio_speed", "0",
+            "-maxrate", "22000k",
+            "-bufsize", "44000k",
+            "-allow_sw", "1",
+            "-tag:v", "hvc1",
+            "-pix_fmt", "yuv420p",
+        ]
     if encoder == "h264_nvenc":
-        return ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", str(q), "-b:v", "0", "-pix_fmt", "yuv420p"]
+        nv_cq = max(14, min(32, q - 2))
+        return [
+            "-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-profile:v", "high",
+            "-rc", "vbr", "-cq", str(nv_cq), "-b:v", "0", "-maxrate", "25000k", "-bufsize", "50000k",
+            "-spatial-aq", "1", "-aq-strength", "8", "-pix_fmt", "yuv420p",
+        ]
+    if encoder == "hevc_nvenc":
+        nv_cq = max(14, min(32, q - 2))
+        return [
+            "-c:v", "hevc_nvenc", "-preset", "p5", "-tune", "hq",
+            "-rc", "vbr", "-cq", str(nv_cq), "-b:v", "0", "-maxrate", "25000k", "-bufsize", "50000k",
+            "-spatial-aq", "1", "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
+        ]
     if encoder == "h264_qsv":
-        return ["-c:v", "h264_qsv", "-global_quality", str(q), "-preset", "fast", "-pix_fmt", "yuv420p"]
+        return ["-c:v", "h264_qsv", "-global_quality", str(max(15, q - 2)), "-preset", "medium", "-pix_fmt", "yuv420p"]
     if encoder == "h264_amf":
-        return ["-c:v", "h264_amf", "-rc", "cqp", "-qp_i", str(q), "-qp_p", str(q), "-quality", "speed", "-pix_fmt", "yuv420p"]
-    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(q), "-pix_fmt", "yuv420p"]
+        amf_q = max(15, q - 2)
+        return ["-c:v", "h264_amf", "-rc", "cqp", "-qp_i", str(amf_q), "-qp_p", str(amf_q), "-quality", "quality", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", "faster", "-profile:v", "high", "-crf", str(max(15, q - 2)), "-pix_fmt", "yuv420p"]
 
 
 # ------------------------------------------------------------------ #3 Smart OpenCV Banner Auto-Detector
