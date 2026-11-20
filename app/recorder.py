@@ -15,7 +15,7 @@ from PySide6.QtCore import QThread, Signal
 
 from app.chat_and_ai import TwitchChatRecorder, save_markers_and_edl
 from app.config import AppConfig, BlurRegion, ChannelConfig
-from app.services import low_priority_popen_kwargs
+from app.services import low_priority_popen_kwargs, send_telegram_video_async
 from app.tools import (
     CREATE_NO_WINDOW,
     EXPORT_PRESETS,
@@ -26,9 +26,12 @@ from app.tools import (
     detect_banner_intervals,
     encoder_ffmpeg_args,
     escape_ffmpeg_filter_path,
+    extract_audio_track,
+    generate_youtube_thumbnail,
     get_ffmpeg_path,
     get_streamlink_cmd,
     get_ytdlp_cmd,
+    merge_time_intervals,
     probe_video,
     resolve_encoder,
     trim_video_fast,
@@ -174,6 +177,41 @@ class LiveRecorderWorker(QThread):
         self._markers.append({"t": t, "note": note})
         return t
 
+    def clip_retrospective(self, seconds: int = 60, tag: str = "dvr") -> Optional[str]:
+        """
+        #6 DVR Retrospective Clipper & #7 Live Auto-Clipper:
+        Cuts the last N seconds from the active fragmented MP4/MKV live recording without stopping the stream!
+        """
+        cur_f = getattr(self, "_current_active_file", None)
+        if not cur_f or not Path(cur_f).exists():
+            return None
+        elapsed = max(0.0, time.time() - self._start_wall)
+        if elapsed < 4.0:
+            return None
+        dur = min(float(seconds), elapsed)
+        start_t = max(0.0, elapsed - dur)
+        clips_dir = self.app_config.ensure_output_dir() / "AutoClips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+        ts_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        uname = sanitize_filename(self.channel.username)
+        out_clip = str(clips_dir / f"{ts_str}_{uname}_{tag}_{int(dur)}s.mp4")
+
+        def _cut_bg() -> None:
+            ok, _ = trim_video_fast(str(cur_f), start_t, start_t + dur, out_clip, accurate_reencode=False)
+            if ok and os.path.exists(out_clip) and os.path.getsize(out_clip) > 10_000:
+                self.log_message.emit(f"[{self.channel.username}] Сохранён клип-откат ({int(dur)} сек): {Path(out_clip).name}")
+                if self.app_config.telegram_bot_token.strip() and self.app_config.telegram_chat_id.strip():
+                    send_telegram_video_async(
+                        self.app_config.telegram_bot_token,
+                        self.app_config.telegram_chat_id,
+                        out_clip,
+                        caption=f"🎬 Авто-клип {self.channel.username} ({int(dur)} сек)",
+                        proxy_url=self.app_config.proxy_url,
+                    )
+
+        threading.Thread(target=_cut_bg, daemon=True).start()
+        return out_clip
+
     def run(self) -> None:
         key = self.channel.key
         uname = self.channel.username
@@ -196,8 +234,19 @@ class LiveRecorderWorker(QThread):
         needs_post_blur = self.channel.blur_mode == "postprocess" and has_regions
         suffix = "_blurred" if use_realtime_blur else ("_raw" if needs_post_blur else "")
 
-        # Start parallel Twitch chat recorder (#15, #32)
+        # Start parallel Twitch chat recorder (#15, #32, #7 Live Auto-Clipper, #10 Keyword Trigger)
         first_base = out_dir / f"{session_ts}_{sanitize_filename(uname)}{suffix}.{ext}"
+        self._current_active_file: Path = first_base
+
+        def _on_chat_keyword(t_sec: float, kw: str, msg_preview: str) -> None:
+            self._markers.append({"t": t_sec, "note": f"Чат «{kw}»: {msg_preview}"})
+            self.log_message.emit(f"[{uname}] Авто-маркер по слову «{kw}» ({format_duration(t_sec)})")
+
+        def _on_chat_hype_spike(t_sec: float, score: int) -> None:
+            self._markers.append({"t": t_sec, "note": f"Взрыв чата ({score} балл.)"})
+            self.log_message.emit(f"[{uname}] Взрыв чата ({score} балл. на {format_duration(t_sec)}) — авто-клип 45 сек...")
+            self.clip_retrospective(45, tag=f"hype_{int(t_sec)}s")
+
         if self.channel.platform == "twitch" and self.channel.record_chat:
             self._chat_rec = TwitchChatRecorder(
                 uname,
@@ -205,6 +254,10 @@ class LiveRecorderWorker(QThread):
                 chat_position=self.app_config.chat_position,
                 chat_font_size=self.app_config.chat_font_size,
                 chat_hide_bots=self.app_config.chat_hide_bots,
+                trigger_words=self.channel.chat_trigger_words,
+                on_keyword_cb=_on_chat_keyword,
+                auto_clip_threshold=self.channel.auto_clip_threshold if self.channel.live_auto_clip else 0,
+                on_hype_spike_cb=_on_chat_hype_spike if self.channel.live_auto_clip else None,
             )
             self._chat_rec.start()
             self.log_message.emit(f"[{uname}] Параллельная запись чата Twitch запущена.")
@@ -226,6 +279,7 @@ class LiveRecorderWorker(QThread):
             else:
                 out_pattern = str(out_dir / f"{file_prefix}{suffix}.{ext}")
                 primary_file = Path(out_pattern)
+            self._current_active_file = primary_file
 
             ok, produced = self._record_single_pass(
                 streamlink_cmd, ffmpeg, out_pattern, primary_file, file_prefix, ext, regions, use_realtime_blur, needs_post_blur
@@ -303,8 +357,17 @@ class LiveRecorderWorker(QThread):
                 f"[{uname}] Сохранено {len(self._markers)} маркеров -> {Path(edl_m).name}"
             )
 
-        # Save session metadata (.meta.json #9)
+        # Save session metadata (.meta.json #9) & optional separate clean audio track (#9)
         if final_files:
+            if self.channel.separate_audio_track:
+                try:
+                    mp3_out = str(Path(final_files[0]).with_suffix(".mp3"))
+                    self.log_message.emit(f"[{uname}] Извлечение отдельной аудиодорожки -> {Path(mp3_out).name}...")
+                    ok_a, _ = extract_audio_track(final_files[0], mp3_out, "mp3")
+                    if ok_a:
+                        self.log_message.emit(f"[{uname}] Аудиодорожка сохранена: {Path(mp3_out).name}")
+                except Exception:
+                    pass
             try:
                 meta_payload = {
                     "channel": uname,
@@ -832,6 +895,37 @@ class BlurPostProcessWorker(QThread):
         total_dur = meta.get("duration", 0.0)
         enc = resolve_encoder(self.app_config.encoder)
 
+        # #1 Smart Segment Blur: if ALL regions are time-bounded or AI-detected, check if we can lossless-copy
+        # the clean portions of the stream and re-encode ONLY the active banner intervals!
+        if (
+            getattr(self.app_config, "smart_segment_blur", True)
+            and not self.normalize_audio
+            and total_dur > 25.0
+            and all((idx in detected_map) or (r.start_sec is not None or r.end_sec is not None) for idx, r in enumerate(self.regions))
+        ):
+            raw_ivs: List[Tuple[float, float]] = []
+            for idx, r in enumerate(self.regions):
+                if idx in detected_map:
+                    raw_ivs.extend(detected_map[idx])
+                else:
+                    s_i = float(r.start_sec or 0.0)
+                    e_i = float(r.end_sec if r.end_sec is not None else total_dur)
+                    if e_i > s_i:
+                        raw_ivs.append((s_i, e_i))
+            active_ivs = merge_time_intervals(raw_ivs, total_dur, pad_sec=1.5, min_gap_sec=4.0)
+            active_dur = sum(e - s for s, e in active_ivs)
+            if not active_ivs:
+                # Banner never appeared! Instant lossless copy (0% quality loss, 100x speed)
+                self.log_message.emit(f"[Smart Segment Blur] Баннер в кадре не обнаружен — мгновенное копирование без потерь!")
+                import shutil
+                shutil.copy2(self.input_path, self.output_path)
+                self._finalize_blur_success()
+                return
+            if active_dur < total_dur * 0.65 and len(active_ivs) <= 25:
+                if self._run_smart_segment_blur(ffmpeg, enc, total_dur, active_ivs):
+                    self._finalize_blur_success()
+                    return
+
         cmd = [
             ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
             "-progress", "pipe:1", "-nostats",
@@ -905,28 +999,7 @@ class BlurPostProcessWorker(QThread):
                 return
 
             if rc == 0 and os.path.exists(self.output_path) and os.path.getsize(self.output_path) > 10_000:
-                fsize = format_bytes(os.path.getsize(self.output_path))
-                # Preserve companion sidecar files (.chat.json, .chat.ass, .markers.json, .meta.json, .edl)
-                for side_ext in (".chat.json", ".chat.ass", ".markers.json", ".meta.json", ".edl"):
-                    src_side = Path(self.input_path).with_suffix(side_ext)
-                    dst_side = Path(self.output_path).with_suffix(side_ext)
-                    if src_side.exists() and not dst_side.exists():
-                        try:
-                            if self.delete_original:
-                                src_side.replace(dst_side)
-                            else:
-                                import shutil
-                                shutil.copy2(src_side, dst_side)
-                        except Exception:
-                            pass
-                if self.delete_original and os.path.abspath(self.input_path) != os.path.abspath(self.output_path):
-                    try:
-                        os.remove(self.input_path)
-                    except Exception:
-                        pass
-                self.progress_updated.emit(self.job_id, 100.0, f"Готово ({fsize})")
-                self.log_message.emit(f"[Блюр] Готово: {Path(self.output_path).name} ({fsize})")
-                self.finished_blur.emit(self.job_id, self.output_path, True)
+                self._finalize_blur_success()
             else:
                 err_msg = (err_out or f"Код {rc}").strip().splitlines()[-1]
                 self.progress_updated.emit(self.job_id, 0.0, f"Ошибка: {err_msg[:60]}")
@@ -935,6 +1008,119 @@ class BlurPostProcessWorker(QThread):
         except Exception as exc:
             self.log_message.emit(f"[Блюр] Ошибка: {exc}")
             self.finished_blur.emit(self.job_id, "", False)
+
+    def _finalize_blur_success(self) -> None:
+        fsize = format_bytes(os.path.getsize(self.output_path))
+        for side_ext in (".chat.json", ".chat.ass", ".markers.json", ".meta.json", ".edl"):
+            src_side = Path(self.input_path).with_suffix(side_ext)
+            dst_side = Path(self.output_path).with_suffix(side_ext)
+            if src_side.exists() and not dst_side.exists():
+                try:
+                    if self.delete_original:
+                        src_side.replace(dst_side)
+                    else:
+                        import shutil
+                        shutil.copy2(src_side, dst_side)
+                except Exception:
+                    pass
+        if self.delete_original and os.path.abspath(self.input_path) != os.path.abspath(self.output_path):
+            try:
+                os.remove(self.input_path)
+            except Exception:
+                pass
+        self.progress_updated.emit(self.job_id, 100.0, f"Готово ({fsize})")
+        self.log_message.emit(f"[Блюр] Готово: {Path(self.output_path).name} ({fsize})")
+        self.finished_blur.emit(self.job_id, self.output_path, True)
+
+    def _run_smart_segment_blur(
+        self,
+        ffmpeg: str,
+        enc: str,
+        total_dur: float,
+        active_ivs: List[Tuple[float, float]],
+    ) -> bool:
+        """
+        Re-encode ONLY the active banner intervals and stream-copy the untouched segments,
+        then concatenate seamlessly. Saves up to 95% time and preserves 100% original quality outside banner windows.
+        """
+        active_dur = sum(e - s for s, e in active_ivs)
+        self.log_message.emit(
+            f"[Smart Segment Blur] Перекодируем только {format_duration(active_dur)} из {format_duration(total_dur)} "
+            f"({len(active_ivs)} интерв., остальное 1:1 оригинал)..."
+        )
+        # Build full timeline partition: [(start, end, needs_blur), ...]
+        timeline: List[Tuple[float, float, bool]] = []
+        cursor = 0.0
+        for s, e in active_ivs:
+            if s - cursor >= 0.5:
+                timeline.append((cursor, s, False))
+            timeline.append((s, e, True))
+            cursor = e
+        if total_dur - cursor >= 0.5:
+            timeline.append((cursor, total_dur, False))
+
+        # Unbounded regions for active chunks (blur is active throughout each active chunk)
+        unbounded_regs = [
+            BlurRegion(
+                x=r.x, y=r.y, w=r.w, h=r.h, mode=r.mode, strength=r.strength,
+                feather=r.feather, image_path=r.image_path, chromakey=r.chromakey,
+                chromakey_color=r.chromakey_color, chromakey_similarity=r.chromakey_similarity,
+                label=r.label,
+            )
+            for r in self.regions
+        ]
+        fg, extra_in = build_blur_filter_graph(unbounded_regs)
+        if not fg:
+            return False
+
+        tmp_dir = Path(self.output_path).parent / f".tmp_sblur_{self.job_id}"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        part_files: List[str] = []
+        ext = Path(self.output_path).suffix or ".mp4"
+        try:
+            for idx, (s, e, is_blur) in enumerate(timeline):
+                if self._stop_requested:
+                    return False
+                dur = max(0.2, e - s)
+                pct = 25.0 + (idx / max(1, len(timeline))) * 68.0
+                self.progress_updated.emit(
+                    self.job_id, pct,
+                    f"Smart Blur {idx + 1}/{len(timeline)} ({'GPU Блюр' if is_blur else '1:1 Копия'})...",
+                )
+                pf = str(tmp_dir / f"part_{idx:04d}{ext}")
+                if is_blur:
+                    cmd = [
+                        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                        "-ss", f"{s:.3f}", "-i", self.input_path, "-t", f"{dur:.3f}",
+                        *extra_in, "-filter_complex", fg, "-map", "[vout]", "-map", "0:a?",
+                        *encoder_ffmpeg_args(enc, self.app_config.video_quality),
+                        "-c:a", "copy", pf,
+                    ]
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=900, creationflags=CREATE_NO_WINDOW)
+                    if res.returncode != 0 or not os.path.exists(pf):
+                        return False
+                else:
+                    ok_c, _ = trim_video_fast(self.input_path, s, e, pf, accurate_reencode=False)
+                    if not ok_c or not os.path.exists(pf):
+                        return False
+                part_files.append(pf)
+
+            self.progress_updated.emit(self.job_id, 95.0, "Бесшовная сборка Smart Segment Blur...")
+            ok_cat, _ = concat_videos(part_files, self.output_path, normalize_clips=False)
+            return bool(ok_cat and os.path.exists(self.output_path) and os.path.getsize(self.output_path) > 10_000)
+        except Exception:
+            return False
+        finally:
+            for pf in part_files:
+                if os.path.exists(pf):
+                    try:
+                        os.remove(pf)
+                    except Exception:
+                        pass
+            try:
+                tmp_dir.rmdir()
+            except Exception:
+                pass
 
 
 # ------------------------------------------------------------------ Studio Processing Worker (#8, #17, #20, #21, #23, #24, #25)
@@ -1217,6 +1403,10 @@ class StudioToolWorker(QThread):
                     self.params.get("game_region"),
                     self.params.get("blur_regions") or [],
                     split_ratio=self.params.get("split_ratio", 0.36),
+                    layout=self.params.get("layout", "split"),
+                    progress_bar=bool(self.params.get("progress_bar", False)),
+                    total_duration=total_dur,
+                    killcam_zoom=bool(self.params.get("killcam_zoom", False)),
                 )
                 self.progress_updated.emit(self.job_id, 5.0, f"Рендер Shorts 9:16 ({enc})...")
                 cmd = [
@@ -1236,6 +1426,62 @@ class StudioToolWorker(QThread):
                     self._emit_done(False, "Отменено", "")
                     return
                 self._emit_done(rc == 0 and os.path.exists(out), out if rc == 0 else err, "Shorts 9:16 готов")
+
+            elif self.action == "batch_shorts":
+                # #15 1-Click Batch Shorts Pipeline from all detected highlights
+                inp = self.params["input_path"]
+                timestamps = self.params.get("timestamps") or []
+                pad = float(self.params.get("pad_sec", 20.0))
+                if not timestamps:
+                    self._emit_done(False, "Нет хайлайтов для генерации Shorts", "")
+                    return
+                p_in = Path(inp)
+                sh_dir = p_in.parent / f"{p_in.stem}_shorts_9x16"
+                sh_dir.mkdir(parents=True, exist_ok=True)
+                clip_dur = pad * 2.0
+                fg, extra_in = build_shorts_9_16_filter(
+                    self.params.get("cam_region"),
+                    self.params.get("game_region"),
+                    self.params.get("blur_regions") or [],
+                    split_ratio=self.params.get("split_ratio", 0.36),
+                    layout=self.params.get("layout", "split"),
+                    progress_bar=bool(self.params.get("progress_bar", True)),
+                    total_duration=clip_dur,
+                    killcam_zoom=bool(self.params.get("killcam_zoom", False)),
+                )
+                created_shorts: List[str] = []
+                for idx, t in enumerate(timestamps):
+                    if self._stop_requested:
+                        self._emit_done(False, "Отменено", "")
+                        return
+                    ts = float(t)
+                    s_t = max(0.0, ts - pad)
+                    pct = (idx / max(1, len(timestamps))) * 95.0
+                    self.progress_updated.emit(self.job_id, pct, f"Shorts 9:16 ({idx + 1}/{len(timestamps)})...")
+                    out_sh = str(sh_dir / f"short_{idx + 1:02d}_{int(ts)}s_9x16.mp4")
+                    cmd = [
+                        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                        "-ss", f"{s_t:.2f}", "-i", inp, "-t", f"{clip_dur:.2f}",
+                        *extra_in,
+                        "-filter_complex", fg, "-map", "[vout]", "-map", "0:a?",
+                        *encoder_ffmpeg_args(enc, q),
+                        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_sh,
+                    ]
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=600, creationflags=CREATE_NO_WINDOW)
+                    if res.returncode == 0 and os.path.exists(out_sh) and os.path.getsize(out_sh) > 10_000:
+                        created_shorts.append(out_sh)
+                if created_shorts:
+                    self._emit_done(True, created_shorts[0], f"Создано {len(created_shorts)} Shorts 9:16")
+                else:
+                    self._emit_done(False, "Не удалось сгенерировать пакет Shorts", "")
+
+            elif self.action == "extract_audio":
+                inp = self.params["input_path"]
+                out = self.params["output_path"]
+                fmt = self.params.get("format", "mp3")
+                self.progress_updated.emit(self.job_id, 25.0, f"Извлечение аудио ({fmt.upper()})...")
+                ok, res = extract_audio_track(inp, out, fmt=fmt)
+                self._emit_done(ok, res, f"Аудиодорожка ({fmt.upper()}) сохранена")
 
             elif self.action == "burn_chat":
                 inp = self.params["input_path"]

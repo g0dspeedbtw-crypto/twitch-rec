@@ -16,7 +16,7 @@ import psutil
 import requests
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
-from app.config import BASE_DIR, AppConfig
+from app.config import BASE_DIR, CONFIG_PATH, AppConfig
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 BELOW_NORMAL_PRIORITY_CLASS = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
@@ -118,6 +118,21 @@ def set_windows_autostart(enabled: bool) -> Tuple[bool, str]:
         return False, str(exc)
 
 
+# ------------------------------------------------------------------ #20 Native OS Notifications (macOS & Windows)
+def send_native_os_notification(title: str, message: str) -> None:
+    """Display a native macOS Notification Center banner (with sound) or Windows tray notification."""
+    if sys.platform == "darwin":
+        def _mac_notify() -> None:
+            try:
+                safe_t = (title or "Twitch Recorder Pro").replace("\\", "\\\\").replace('"', '\\"')
+                safe_m = (message or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", " · ")
+                script = f'display notification "{safe_m}" with title "{safe_t}" sound name "Glass"'
+                subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
+            except Exception:
+                pass
+        threading.Thread(target=_mac_notify, daemon=True).start()
+
+
 # ------------------------------------------------------------------ #32 Telegram & Discord Notifier
 def send_notification_async(
     config: AppConfig,
@@ -126,7 +141,9 @@ def send_notification_async(
     image_path: Optional[str] = None,
     log_cb: Optional[Callable[[str], None]] = None,
 ) -> None:
-    """Fire-and-forget notification to Telegram Bot and/or Discord Webhook."""
+    """Fire-and-forget notification to macOS/Windows Notification Center, Telegram Bot, and/or Discord Webhook."""
+    if getattr(config, "native_os_notifications", True):
+        send_native_os_notification(title, message)
     has_tg = bool(config.telegram_bot_token.strip() and config.telegram_chat_id.strip())
     has_dc = bool(config.discord_webhook_url.strip())
     if not has_tg and not has_dc:
@@ -311,34 +328,56 @@ class ResourceMonitorWorker(QThread):
                 time.sleep(0.1)
 
 
-# ------------------------------------------------------------------ #19 Global Hotkey Poller (Windows)
+# ------------------------------------------------------------------ #19 Global Hotkey Poller (Windows & macOS)
 _VK_MAP = {
     "F1": 0x70, "F2": 0x71, "F3": 0x72, "F4": 0x73, "F5": 0x74, "F6": 0x75,
     "F7": 0x76, "F8": 0x77, "F9": 0x78, "F10": 0x79, "F11": 0x7A, "F12": 0x7B,
 }
+_MAC_KEYCODE_MAP = {
+    "F1": 122, "F2": 120, "F3": 99, "F4": 118, "F5": 96, "F6": 97,
+    "F7": 98, "F8": 100, "F9": 101, "F10": 109, "F11": 103, "F12": 111,
+}
 
 
 class GlobalHotkeyMonitor(QObject):
-    """Lightweight global Windows hotkey detector (e.g. F9 to drop a live highlight marker)."""
+    """Lightweight global Windows & macOS hotkey detector (e.g. F9 to drop a live highlight marker)."""
 
     triggered = Signal()
 
     def __init__(self, key_name: str = "F9", parent=None):
         super().__init__(parent)
         self._vk = _VK_MAP.get(key_name.upper(), 0x78)
+        self._mac_kc = _MAC_KEYCODE_MAP.get(key_name.upper(), 101)
+        self._cg = None
+        if sys.platform == "darwin":
+            try:
+                self._cg = ctypes.cdll.LoadLibrary(
+                    "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+                )
+                self._cg.CGEventSourceKeyState.argtypes = [ctypes.c_uint32, ctypes.c_uint16]
+                self._cg.CGEventSourceKeyState.restype = ctypes.c_bool
+            except Exception:
+                self._cg = None
         self._was_down = False
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll)
-        if os.name == "nt":
+        if os.name == "nt" or (sys.platform == "darwin" and self._cg is not None):
             self._timer.start(80)
 
     def set_key(self, key_name: str) -> None:
         self._vk = _VK_MAP.get(key_name.upper(), 0x78)
+        self._mac_kc = _MAC_KEYCODE_MAP.get(key_name.upper(), 101)
 
     def _poll(self) -> None:
         try:
-            state = ctypes.windll.user32.GetAsyncKeyState(self._vk)
-            is_down = bool(state & 0x8000)
+            if os.name == "nt":
+                state = ctypes.windll.user32.GetAsyncKeyState(self._vk)
+                is_down = bool(state & 0x8000)
+            elif sys.platform == "darwin" and self._cg is not None:
+                # kCGEventSourceStateCombinedSessionState = 0
+                is_down = bool(self._cg.CGEventSourceKeyState(0, self._mac_kc))
+            else:
+                return
             if is_down and not self._was_down:
                 self.triggered.emit()
             self._was_down = is_down
@@ -382,6 +421,144 @@ def send_telegram_reply_async(
             pass
 
     threading.Thread(target=_send, daemon=True).start()
+
+
+def send_telegram_video_async(
+    token: str,
+    chat_id: str,
+    video_path: str,
+    caption: str = "",
+    proxy_url: str = "",
+    done_cb: Optional[Callable[[bool, str], None]] = None,
+) -> None:
+    """#16 Upload a video/Shorts (.mp4 up to 50MB) directly to a Telegram chat or channel via Bot API."""
+    tok = (token or "").strip()
+    cid = (chat_id or "").strip()
+    if not tok or not cid:
+        if done_cb:
+            done_cb(False, "Укажите Telegram Bot Token и Chat ID в Настройках")
+        return
+    if not video_path or not os.path.exists(video_path):
+        if done_cb:
+            done_cb(False, "Видеофайл не найден")
+        return
+    sz_mb = os.path.getsize(video_path) / (1024 * 1024)
+    if sz_mb > 49.5:
+        if done_cb:
+            done_cb(False, f"Файл ({sz_mb:.1f} МБ) превышает лимит Telegram Bot API (50 МБ) — сначала сожмите через пресет «Telegram 50 МБ»")
+        return
+    proxies = {"http": proxy_url.strip(), "https": proxy_url.strip()} if proxy_url.strip() else None
+
+    def _upload() -> None:
+        try:
+            with open(video_path, "rb") as f:
+                r = requests.post(
+                    f"https://api.telegram.org/bot{tok}/sendVideo",
+                    data={"chat_id": cid, "caption": (caption or Path(video_path).name)[:1000], "supports_streaming": "true"},
+                    files={"video": (Path(video_path).name, f, "video/mp4")},
+                    timeout=180,
+                    proxies=proxies,
+                )
+            if r.status_code == 200 and r.json().get("ok"):
+                if done_cb:
+                    done_cb(True, f"Видео опубликовано в Telegram ({sz_mb:.1f} МБ)")
+            else:
+                desc = (r.json().get("description") if r.headers.get("content-type", "").startswith("application/json") else r.text) or f"HTTP {r.status_code}"
+                if done_cb:
+                    done_cb(False, f"Ошибка Telegram API: {desc}")
+        except Exception as exc:
+            if done_cb:
+                done_cb(False, f"Ошибка отправки видео: {exc}")
+
+    threading.Thread(target=_upload, daemon=True).start()
+
+
+# ------------------------------------------------------------------ #21 Cloud Config & Blur Presets Sync (GitHub Gist + Cloud Folder)
+def sync_profile_cloud(
+    config: AppConfig,
+    direction: str = "push",  # "push" | "pull"
+) -> Tuple[bool, str]:
+    """
+    Synchronize config.json (channels + blur scenes) via:
+      1. Shared Cloud Folder (iCloud Drive / OneDrive / Dropbox path in config.cloud_sync_path), and/or
+      2. Private GitHub Gist (via config.cloud_gist_token & config.cloud_gist_id).
+    """
+    config.save()
+    proxies = {"http": config.proxy_url.strip(), "https": config.proxy_url.strip()} if config.proxy_url.strip() else None
+    msgs: List[str] = []
+
+    # 1. Local Cloud Folder sync (iCloud / Dropbox / OneDrive)
+    sync_p_str = (config.cloud_sync_path or "").strip()
+    if sync_p_str:
+        target = Path(sync_p_str)
+        if target.is_dir() or not target.suffix:
+            target.mkdir(parents=True, exist_ok=True)
+            target = target / "TwitchRecorderPro_sync_config.json"
+        try:
+            if direction == "push":
+                target.write_text(CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+                msgs.append(f"Сохранено в облачную папку ({target.name})")
+            else:
+                if not target.exists():
+                    return False, f"Файл синхронизации не найден: {target}"
+                CONFIG_PATH.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+                msgs.append(f"Загружено из облачной папки ({target.name})")
+        except Exception as exc:
+            return False, f"Ошибка облачной папки: {exc}"
+
+    # 2. GitHub Gist Sync
+    tok = (config.cloud_gist_token or "").strip()
+    gist_id = (config.cloud_gist_id or "").strip()
+    if tok:
+        headers = {
+            "Authorization": f"Bearer {tok}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "TwitchRecorderPro",
+        }
+        try:
+            if direction == "push":
+                raw_json = CONFIG_PATH.read_text(encoding="utf-8")
+                payload = {
+                    "description": "Twitch Recorder Pro — Cloud Profile & Blur Presets Sync",
+                    "public": False,
+                    "files": {"twitch_recorder_pro_config.json": {"content": raw_json}},
+                }
+                if gist_id:
+                    r = requests.patch(f"https://api.github.com/gists/{gist_id}", json=payload, headers=headers, timeout=15, proxies=proxies)
+                else:
+                    r = requests.post("https://api.github.com/gists", json=payload, headers=headers, timeout=15, proxies=proxies)
+                r.raise_for_status()
+                new_id = str(r.json().get("id") or "")
+                if new_id and new_id != gist_id:
+                    config.cloud_gist_id = new_id
+                    config.save()
+                msgs.append(f"Синхронизировано с GitHub Gist ({new_id[:8]})")
+            else:
+                if not gist_id:
+                    # Try finding an existing Gist automatically
+                    r_list = requests.get("https://api.github.com/gists", headers=headers, timeout=15, proxies=proxies)
+                    r_list.raise_for_status()
+                    for g in r_list.json() or []:
+                        if "twitch_recorder_pro_config.json" in (g.get("files") or {}):
+                            gist_id = str(g.get("id") or "")
+                            break
+                if not gist_id:
+                    return False, "Не найден Gist с профилем — сначала нажмите «Выгрузить в облако»"
+                r = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=15, proxies=proxies)
+                r.raise_for_status()
+                files = r.json().get("files") or {}
+                f_obj = files.get("twitch_recorder_pro_config.json") or (next(iter(files.values())) if files else None)
+                if not f_obj or not f_obj.get("content"):
+                    return False, "В Gist отсутствует конфигурация"
+                CONFIG_PATH.write_text(f_obj["content"], encoding="utf-8")
+                config.cloud_gist_id = gist_id
+                msgs.append(f"Загружено из GitHub Gist ({gist_id[:8]})")
+        except Exception as exc:
+            return False, f"Ошибка GitHub Gist: {exc}"
+
+    if not msgs:
+        return False, "Укажите папку облака (iCloud/Dropbox) или токен GitHub Gist в Настройках → Система"
+    return True, " · ".join(msgs)
 
 
 class TelegramBotWorker(QThread):

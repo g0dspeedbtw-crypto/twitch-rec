@@ -219,15 +219,22 @@
                 <button data-mode="blur" class="active">Блюр</button>
                 <button data-mode="pixelate">Пиксели</button>
                 <button data-mode="solid">Чёрный</button>
-                <button data-mode="image">Логотип</button>
+                <button data-mode="image">Медиа / GIF</button>
               </div>
             </div>
 
             <div class="field hidden" id="bsLogoField">
-              <label>Картинка / Логотип (PNG/JPG)</label>
+              <label>Картинка / GIF / Видео-баннер (PNG, GIF, MP4, WebM)</label>
               <div class="input-row">
-                <input type="text" id="bsLogoPath" class="input" placeholder="Выберите PNG..." />
+                <input type="text" id="bsLogoPath" class="input" placeholder="Выберите PNG, GIF или MP4..." />
                 <button class="btn btn-subtle" id="bsPickLogo"><i data-icon="image"></i></button>
+              </div>
+              <div class="input-row" style="margin-top:6px;">
+                <label class="switch-inline" title="Вырезать зелёный фон (Green Screen) у видео/картинки">
+                  <input type="checkbox" id="bsChromaKey" />
+                  <span class="switch-track"></span>
+                  <span style="font-size:12px;">Хромакей (Green Screen)</span>
+                </label>
               </div>
             </div>
 
@@ -260,6 +267,11 @@
                   <span class="switch-track"></span>
                 </label>
               </div>
+              <label class="switch-inline" style="font-size:12px;">
+                <input type="checkbox" id="bsTrackMotion" />
+                <span class="switch-track"></span>
+                <span>Трекинг движения баннера (±25%)</span>
+              </label>
               <div class="input-row">
                 <button class="btn btn-soft btn-full" id="bsSaveTpl">
                   <i data-icon="sparkles"></i><span>Запомнить образец</span>

@@ -24,8 +24,10 @@ from app.chat_and_ai import (
     HighlightMoment,
     WhisperAIWorker,
     analyze_chat_highlights,
+    detect_audio_events,
     detect_loud_moments,
     fetch_twitch_vod_chat,
+    generate_stream_digest,
     generate_youtube_metadata,
     save_markers_and_edl,
 )
@@ -62,13 +64,16 @@ from app.services import (
     cleanup_old_recordings,
     send_notification_async,
     send_telegram_reply_async,
+    send_telegram_video_async,
     set_windows_autostart,
+    sync_profile_cloud,
 )
 from app.tools import (
     EXPORT_PRESETS,
     detect_available_encoders,
     detect_banner_intervals,
     extract_frame_from_file,
+    generate_youtube_thumbnail,
     get_ffmpeg_path,
     get_streamlink_path,
     get_ytdlp_path,
@@ -168,6 +173,8 @@ class _HighlightsWorker(QThread):
     def run(self) -> None:
         if self.mode == "chat":
             hm, hl = analyze_chat_highlights(self.path)
+        elif self.mode == "events":
+            hm, hl = detect_audio_events(self.path)
         else:
             hm, hl = detect_loud_moments(self.path)
         self.ready.emit(self.mode, hm, [asdict(h) for h in hl])
@@ -370,6 +377,25 @@ class _BannerTestWorker(QThread):
     def run(self) -> None:
         ivs = detect_banner_intervals(self.video_path, self.region, sample_fps=0.5)
         self.ready.emit(ivs, self.region.label)
+
+
+class _DigestWorker(QThread):
+    ready = Signal(bool, str)
+
+    def __init__(self, video_path: str, cfg: AppConfig, parent=None):
+        super().__init__(parent)
+        self.video_path = video_path
+        self.cfg = cfg
+
+    def run(self) -> None:
+        ok, text = generate_stream_digest(
+            self.video_path,
+            llm_api_url=self.cfg.llm_api_url,
+            llm_api_key=self.cfg.llm_api_key,
+            llm_model=self.cfg.llm_model,
+            proxy_url=self.cfg.proxy_url,
+        )
+        self.ready.emit(ok, text)
 
 
 class AppBridge(QObject):
@@ -693,6 +719,8 @@ class AppBridge(QObject):
             "auto_reconnect", "auto_concat_parts", "record_chat", "disable_ads",
             "keep_original", "segment_minutes", "category_filter", "title_filter",
             "schedule_enabled", "schedule_start", "schedule_end", "schedule_days",
+            "auto_scene_by_game", "live_auto_clip", "auto_clip_threshold",
+            "chat_trigger_words", "separate_audio_track",
         ):
             if field_name in patch:
                 setattr(ch, field_name, patch[field_name])
@@ -749,8 +777,20 @@ class AppBridge(QObject):
                     self._log(f"[Статус {ch.username}] {st.error}")
                 if not st.is_live:
                     self.manually_stopped.discard(ch.key)
-                elif st.preview_url:
-                    thumb_targets[ch.key] = st.preview_url
+                else:
+                    if st.preview_url:
+                        thumb_targets[ch.key] = st.preview_url
+                    # #2 Auto-switch blur scene preset by current stream game/category
+                    if getattr(ch, "auto_scene_by_game", True) and st.game and len(ch.blur_presets) > 1:
+                        g_low = st.game.strip().lower()
+                        for pname in ch.blur_presets.keys():
+                            p_low = pname.strip().lower()
+                            if p_low and (p_low == g_low or p_low in g_low or g_low in p_low):
+                                if ch.active_preset != pname:
+                                    ch.active_preset = pname
+                                    self.config.save()
+                                    self._log(f"[Авто-сцена] {ch.username}: игра «{st.game}» -> сцена блюра «{pname}»")
+                                break
 
                 if (
                     self.config.auto_monitor_enabled
@@ -851,6 +891,19 @@ class AppBridge(QObject):
             t = w.add_marker("Момент")
             self._log(f"[Маркер] {w.channel.username} -> {format_duration(t)}")
             self._toast("Маркер поставлен", f"{w.channel.username} · {format_duration(t)}", "success")
+
+    @Slot(str, int)
+    def clipLastSeconds(self, key: str, seconds: int = 60) -> None:
+        """#6 DVR Retrospective Clip: cut last N seconds from an active live recording without interrupting it."""
+        w = self.live_recorders.get(key)
+        if not w:
+            self._toast("Откат эфира (DVR)", "Сначала запустите запись канала", "error")
+            return
+        out = w.clip_retrospective(max(10, int(seconds or 60)), tag="dvr")
+        if out:
+            self._toast("DVR-клип сохранён", f"{w.channel.username} · последние {seconds} сек -> AutoClips/", "success")
+        else:
+            self._toast("Откат эфира (DVR)", "Подождите хотя бы 5 секунд после старта записи", "info")
 
     def _on_global_marker(self) -> None:
         if not self.live_recorders:
@@ -1375,6 +1428,91 @@ class AppBridge(QObject):
         self._aux_workers.append(w)
         w.start()
 
+    @Slot(bool, str)
+    def _on_digest_ready(self, ok: bool, text: str) -> None:
+        self._emit("stream_digest", {"ok": ok, "text": text})
+
+    @Slot(str)
+    def generateStreamDigest(self, video_path: str) -> None:
+        """#18 Generate a structured Stream Summary / Digest from chat, markers, and Whisper subtitles."""
+        if not video_path or not os.path.exists(video_path):
+            self._toast("AI Конспект", "Выберите видеофайл", "error")
+            return
+        self._toast("AI Конспект", "Анализируем чат, маркеры и субтитры...", "info")
+        w = _DigestWorker(video_path, deepcopy(self.config), self)
+        w.ready.connect(self._on_digest_ready)
+        w.finished.connect(w.deleteLater)
+        self._aux_workers.append(w)
+        w.start()
+
+    @Slot(str, result=str)
+    def createThumbnail(self, payload_json: str) -> str:
+        """#11 Generate a 1280x720 YouTube / Shorts thumbnail JPG with custom headline, subtitle, and neon border."""
+        try:
+            p = json.loads(payload_json or "{}")
+            src = (p.get("source_path") or "").strip()
+            if not src or not os.path.exists(src):
+                return json.dumps({"ok": False, "error": "Выберите видео или кадр"})
+            ts = float(p.get("timestamp_sec") or 10.0)
+            headline = str(p.get("headline") or "").strip()
+            subtitle = str(p.get("subtitle") or "").strip()
+            accent = str(p.get("accent_color") or "#8B5CF6").strip()
+            border = bool(p.get("add_border", True))
+            out_path = (p.get("output_path") or "").strip()
+            if not out_path:
+                sp = Path(src)
+                out_path = str(sp.with_name(f"{sp.stem}_thumbnail.jpg"))
+            ok, res = generate_youtube_thumbnail(
+                src, out_path, timestamp_sec=ts, headline=headline,
+                subtitle=subtitle, accent_color=accent, add_border=border
+            )
+            if ok:
+                self.allow_media_file(res)
+                self._log(f"[Обложка YouTube] Сохранена: {Path(res).name}")
+                self._toast("Обложка создана", Path(res).name, "success")
+                return json.dumps({"ok": True, "path": res})
+            self._toast("Ошибка обложки", res, "error")
+            return json.dumps({"ok": False, "error": res})
+        except Exception as exc:
+            return json.dumps({"ok": False, "error": str(exc)})
+
+    @Slot(str, str)
+    def publishVideoToTelegram(self, video_path: str, caption: str = "") -> None:
+        """#16 Direct 1-click upload of a video/Shorts (<50MB) to the user's Telegram chat/channel."""
+        if not video_path or not os.path.exists(video_path):
+            self._toast("Публикация в Telegram", "Видеофайл не найден", "error")
+            return
+        self._toast("Telegram", f"Отправка {Path(video_path).name} в Telegram...", "info")
+
+        def _done(ok: bool, msg: str) -> None:
+            self._log(f"[Telegram Publish] {msg}")
+            self._toast("Telegram", msg, "success" if ok else "error")
+
+        send_telegram_video_async(
+            self.config.telegram_bot_token,
+            self.config.telegram_chat_id,
+            video_path,
+            caption=caption or f"🎬 {Path(video_path).stem}",
+            proxy_url=self.config.proxy_url,
+            done_cb=_done,
+        )
+
+    @Slot(str, result=str)
+    def syncCloudProfile(self, direction: str = "push") -> str:
+        """#21 Sync channels & blur presets via Cloud Folder (iCloud/Dropbox) or GitHub Gist."""
+        ok, msg = sync_profile_cloud(self.config, direction=direction)
+        if ok:
+            if direction == "pull":
+                self.config = AppConfig.load()
+                self._register_configured_media_files()
+                self._emit("config", asdict(self.config))
+                self._push_channels()
+            self._log(f"[Облачная синхронизация] {msg}")
+            self._toast("Облачная синхронизация", msg, "success")
+        else:
+            self._toast("Облачная синхронизация", msg, "error")
+        return json.dumps({"ok": ok, "message": msg, "config": asdict(self.config)}, ensure_ascii=False)
+
     @Slot(str)
     def runStudioAction(self, payload_json: str) -> None:
         p = json.loads(payload_json)
@@ -1406,6 +1544,7 @@ class AppBridge(QObject):
                 encoder=resolve_encoder(self.config.encoder),
                 quality=self.config.video_quality,
                 initial_prompt=p.get("whisper_prompt", self.config.whisper_prompt),
+                task=p.get("task", "transcribe"),
                 parent=self,
             )
             w.progress_updated.connect(self._on_job_progress)
@@ -1417,7 +1556,7 @@ class AppBridge(QObject):
 
         # Convert dict regions to BlurRegion dataclasses for Shorts 9:16
         params = dict(p.get("params") or {})
-        if action == "shorts":
+        if action in ("shorts", "batch_shorts"):
             if params.get("cam_region"):
                 params["cam_region"] = AppConfig._parse_region(params["cam_region"])
             if params.get("game_region"):
@@ -1453,6 +1592,10 @@ class AppBridge(QObject):
             self._push_job(jid)
         if ok and out_path:
             self._toast("Задача студии готова", Path(out_path).name, "success")
+            if getattr(self.config, "auto_publish_telegram", False) and os.path.exists(out_path):
+                sz_mb = os.path.getsize(out_path) / (1024 * 1024)
+                if sz_mb <= 49.0 and out_path.lower().endswith(".mp4"):
+                    self.publishVideoToTelegram(out_path, caption=f"🎬 {Path(out_path).stem}")
         else:
             j = self.jobs.get(jid) or {}
             self._toast("Ошибка задачи студии", j.get("status") or "Не удалось выполнить операцию", "error")
@@ -1473,6 +1616,8 @@ class AppBridge(QObject):
             "llm_api_url", "llm_api_key", "llm_model",
             "chat_position", "chat_font_size", "chat_hide_bots", "watermark_path",
             "theme", "compact_cards", "github_repo", "auto_check_updates",
+            "smart_segment_blur", "native_os_notifications", "auto_publish_telegram",
+            "cloud_sync_path", "cloud_gist_token", "cloud_gist_id",
         ):
             if k in d:
                 val = normalize_github_repo(str(d[k])) if k == "github_repo" else d[k]

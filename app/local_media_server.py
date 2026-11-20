@@ -11,7 +11,7 @@ from typing import Callable, Dict, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 from app.config import get_resource_dir
-from app.tools import extract_frame_from_file
+from app.tools import CREATE_NO_WINDOW, extract_frame_from_file, get_ffmpeg_path, get_streamlink_cmd
 
 WEB_DIR = get_resource_dir() / "web"
 THUMB_CACHE_DIR = Path(tempfile.gettempdir()) / "twitch_recorder_thumbs"
@@ -113,6 +113,16 @@ class LocalMediaServer:
                         self._send_bytes(404, "text/plain", b"No preview")
                     return
 
+                # 1b. Live ad-free stream video/audio preview proxy (#8 Live Stream Mini-Player)
+                if path == "/media/stream":
+                    stream_url = qs.get("url", [""])[0].strip()
+                    qual = qs.get("q", ["720p60,720p,best"])[0].strip()
+                    if not stream_url.startswith(("http://", "https://")):
+                        self._send_bytes(400, "text/plain", b"Invalid stream URL")
+                        return
+                    self._serve_live_stream_proxy(stream_url, qual)
+                    return
+
                 # 2. Cached thumbnail for a recorded video file
                 if path == "/media/thumb":
                     file_path = qs.get("path", [""])[0]
@@ -210,6 +220,54 @@ class LocalMediaServer:
                             remaining -= len(chunk)
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                     pass
+
+            def _serve_live_stream_proxy(self, stream_url: str, quality: str) -> None:
+                import subprocess
+                sl_cmd = get_streamlink_cmd()
+                ffmpeg = get_ffmpeg_path()
+                if not sl_cmd or not ffmpeg:
+                    self._send_bytes(503, "text/plain", b"Streamlink/FFmpeg unavailable")
+                    return
+                sl_args = [*sl_cmd, "--stdout", "--quiet", "--twitch-disable-ads", stream_url, quality]
+                ff_args = [
+                    ffmpeg, "-hide_banner", "-loglevel", "error",
+                    "-fflags", "+genpts+discardcorrupt", "-i", "pipe:0",
+                    "-c", "copy", "-f", "mp4",
+                    "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+                    "pipe:1",
+                ]
+                sl_proc = None
+                ff_proc = None
+                try:
+                    sl_proc = subprocess.Popen(
+                        sl_args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW
+                    )
+                    ff_proc = subprocess.Popen(
+                        ff_args, stdin=sl_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                        creationflags=CREATE_NO_WINDOW,
+                    )
+                    if sl_proc.stdout:
+                        sl_proc.stdout.close()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "video/mp4")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    assert ff_proc.stdout is not None
+                    while True:
+                        chunk = ff_proc.stdout.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except Exception:
+                    pass
+                finally:
+                    for p in (ff_proc, sl_proc):
+                        if p and p.poll() is None:
+                            try:
+                                p.kill()
+                            except Exception:
+                                pass
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port = self._server.server_address[1]

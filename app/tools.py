@@ -272,6 +272,7 @@ def detect_banner_intervals(
     """
     Scan video at sample_fps using OpenCV template matching on the region's saved template.
     Returns merged list of (start_sec, end_sec) intervals where the ad banner is visible.
+    If region.track_motion is True, searches a wider window (+/-25%) to follow moving banners.
     """
     if not region.template_path or not os.path.exists(region.template_path):
         return []
@@ -305,9 +306,9 @@ def detect_banner_intervals(
             break
 
         h, w = frame.shape[:2]
-        # Slightly expand search window around region (+/- 4%) for minor position shifts
-        pad_x = int(w * 0.04)
-        pad_y = int(h * 0.04)
+        pad_ratio = 0.24 if r.track_motion else 0.04
+        pad_x = int(w * pad_ratio)
+        pad_y = int(h * pad_ratio)
         x1 = max(0, int(r.x * w) - pad_x)
         y1 = max(0, int(r.y * h) - pad_y)
         x2 = min(w, int((r.x + r.w) * w) + pad_x)
@@ -315,7 +316,6 @@ def detect_banner_intervals(
         roi = frame[y1:y2, x1:x2]
         if roi.size > 0:
             roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            # Resize template proportionally to ROI region width/height
             target_tw = max(8, int(r.w * w))
             target_th = max(8, int(r.h * h))
             if target_tw <= roi_gray.shape[1] and target_th <= roi_gray.shape[0]:
@@ -335,7 +335,6 @@ def detect_banner_intervals(
     if not active_times:
         return []
 
-    # Merge adjacent detections into smooth intervals (gap tolerance = 2.5s)
     gap_tol = max(2.0, (step / fps) * 2.5)
     intervals: List[Tuple[float, float]] = []
     cur_s = max(0.0, active_times[0] - 0.5)
@@ -349,6 +348,73 @@ def detect_banner_intervals(
             cur_e = t + (step / fps) + 0.5
     intervals.append((round(cur_s, 2), round(cur_e, 2)))
     return intervals
+
+
+def track_moving_banner_boxes(
+    video_path: str,
+    region: BlurRegion,
+    sample_fps: float = 2.0,
+) -> List[Tuple[float, float, float, float]]:
+    """
+    Track a moving banner's position across a video using OpenCV template matching.
+    Returns list of (t_start, t_end, norm_x, norm_y) keyframes where the banner moved.
+    """
+    if not region.template_path or not os.path.exists(region.template_path):
+        return []
+    try:
+        import cv2
+    except Exception:
+        return []
+
+    tpl = cv2.imread(region.template_path)
+    if tpl is None or tpl.size == 0:
+        return []
+    tpl_gray = cv2.cvtColor(tpl, cv2.COLOR_BGR2GRAY)
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return []
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    step = max(1, int(round(fps / max(0.5, sample_fps))))
+    dt = step / fps
+    r = region.clamped()
+    keyframes: List[Tuple[float, float, float, float]] = []
+    frame_idx = 0
+
+    while True:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            break
+        h, w = frame.shape[:2]
+        pad_x, pad_y = int(w * 0.30), int(h * 0.30)
+        x1 = max(0, int(r.x * w) - pad_x)
+        y1 = max(0, int(r.y * h) - pad_y)
+        x2 = min(w, int((r.x + r.w) * w) + pad_x)
+        y2 = min(h, int((r.y + r.h) * h) + pad_y)
+        roi = frame[y1:y2, x1:x2]
+        if roi.size > 0:
+            roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            tw, th = max(8, int(r.w * w)), max(8, int(r.h * h))
+            if tw <= roi_gray.shape[1] and th <= roi_gray.shape[0]:
+                rtpl = cv2.resize(tpl_gray, (tw, th), interpolation=cv2.INTER_AREA)
+                res = cv2.matchTemplate(roi_gray, rtpl, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                if max_val >= r.detect_threshold:
+                    nx = max(0.0, min(1.0 - r.w, (x1 + max_loc[0]) / w))
+                    ny = max(0.0, min(1.0 - r.h, (y1 + max_loc[1]) / h))
+                    t_cur = frame_idx / fps
+                    if keyframes and abs(keyframes[-1][2] - nx) < 0.012 and abs(keyframes[-1][3] - ny) < 0.012 and t_cur <= keyframes[-1][1] + dt * 1.5:
+                        prev = keyframes[-1]
+                        keyframes[-1] = (prev[0], round(t_cur + dt, 2), prev[2], prev[3])
+                    else:
+                        keyframes.append((round(t_cur, 2), round(t_cur + dt, 2), round(nx, 4), round(ny, 4)))
+        frame_idx += step
+        if total_frames > 0 and frame_idx >= total_frames:
+            break
+    cap.release()
+    return keyframes
 
 
 # ------------------------------------------------------------------ #1, #2, #5 Supercharged Blur Filter Builder
@@ -404,13 +470,13 @@ def build_blur_filter_graph(
     need_src = [
         (orig_i, r)
         for orig_i, r in valid
-        if r.mode in ("blur", "pixelate") or (r.mode == "image" and not (r.image_path and os.path.exists(r.image_path)))
+        if r.mode in ("blur", "pixelate") or (r.mode in ("image", "video") and not (r.image_path and os.path.exists(r.image_path)))
     ]
-    # Image overlay regions (need extra -i input + reference size)
+    # Image or animated/video overlay regions (need extra -i input + reference size)
     img_regions = [
         (orig_i, r)
         for orig_i, r in valid
-        if r.mode == "image" and r.image_path and os.path.exists(r.image_path)
+        if r.mode in ("image", "video") and r.image_path and os.path.exists(r.image_path)
     ]
 
     split_targets: List[str] = ["[base]"]
@@ -461,15 +527,25 @@ def build_blur_filter_graph(
             current_pad = next_pad
             continue
 
-        if r.mode == "image" and orig_i in ref_map:
-            extra_inputs.extend(["-i", r.image_path])
+        if r.mode in ("image", "video") and orig_i in ref_map:
+            ext_low = os.path.splitext(r.image_path)[1].lower()
+            is_anim = r.mode == "video" or ext_low in (".mp4", ".webm", ".gif", ".mov", ".mkv")
+            if is_anim:
+                extra_inputs.extend(["-stream_loop", "-1", "-i", r.image_path])
+            else:
+                extra_inputs.extend(["-i", r.image_path])
             img_idx = next_input_idx
             next_input_idx += 1
             parts.append(
                 f"{ref_map[orig_i]}crop=w='{crop_w}':h='{crop_h}':x='{crop_x}':y='{crop_y}'[icrop{orig_i}]"
             )
+            ck_filter = ""
+            if r.chromakey:
+                ck_col = r.chromakey_color or "0x00FF00"
+                ck_sim = max(0.05, min(0.70, float(r.chromakey_similarity or 0.25)))
+                ck_filter = f",chromakey={ck_col}:{ck_sim:.2f}:0.08"
             parts.append(
-                f"[{img_idx}:v]format=rgba[irgba{orig_i}]"
+                f"[{img_idx}:v]format=rgba{ck_filter}[irgba{orig_i}]"
             )
             parts.append(
                 f"[irgba{orig_i}][icrop{orig_i}]scale2ref=w=iw:h=ih:flags=lanczos[fx{orig_i}][idrop{orig_i}]"
@@ -477,7 +553,7 @@ def build_blur_filter_graph(
             parts.append(f"[idrop{orig_i}]nullsink")
             next_pad = f"[ov{orig_i}]"
             parts.append(
-                f"{current_pad}[fx{orig_i}]overlay=x='{ov_x}':y='{ov_y}':shortest=0{enable_expr}{next_pad}"
+                f"{current_pad}[fx{orig_i}]overlay=x='{ov_x}':y='{ov_y}':shortest=0:eof_action=repeat{enable_expr}{next_pad}"
             )
             current_pad = next_pad
             continue
@@ -805,12 +881,19 @@ def build_shorts_9_16_filter(
     game_region: Optional[BlurRegion],
     blur_regions: List[BlurRegion],
     split_ratio: float = 0.36,
+    layout: str = "split",        # "split" | "pip_circle" | "pip_rounded" | "blur_bg"
+    progress_bar: bool = False,
+    total_duration: float = 0.0,
+    killcam_zoom: bool = False,
 ) -> Tuple[str, List[str]]:
     """
     Build a 1080x1920 vertical Shorts/TikTok filter graph:
       - First applies any blur_regions to the full frame [0:v] -> [pre]
-      - If cam_region is provided: top (split_ratio of 1920) = zoomed webcam, bottom = gameplay
-      - If no cam_region: blurred background fill + centered crisp gameplay
+      - layout="split": top (split_ratio of 1920) = zoomed webcam, bottom = gameplay
+      - layout="pip_circle" / "pip_rounded": full 1080x1920 gameplay with circular/rounded webcam PiP
+      - layout="blur_bg" (or no cam_region): blurred background fill + centered crisp gameplay
+      - killcam_zoom: smooth 1.35x center zoom on gameplay
+      - progress_bar: animated neon bottom progress bar
     """
     parts: List[str] = []
     extra_inputs: List[str] = []
@@ -822,16 +905,52 @@ def build_shorts_9_16_filter(
             parts.append(fg.replace("[vout]", "[pre]"))
             base_pad = "[pre]"
 
-    if cam_region:
+    gr = game_region.clamped() if game_region else BlurRegion(0.18, 0.0, 0.64, 1.0)
+    if killcam_zoom:
+        # Zoom in 1.35x toward center of game_region
+        zw = max(0.08, gr.w / 1.35)
+        zh = max(0.08, gr.h / 1.35)
+        zx = max(0.0, min(1.0 - zw, gr.x + (gr.w - zw) / 2.0))
+        zy = max(0.0, min(1.0 - zh, gr.y + (gr.h - zh) / 2.0))
+        gr = BlurRegion(zx, zy, zw, zh)
+
+    gr_w = f"max(4,trunc(iw*{gr.w:.6f}/2)*2)"
+    gr_h = f"max(4,trunc(ih*{gr.h:.6f}/2)*2)"
+
+    if cam_region and layout in ("pip_circle", "pip_rounded"):
+        cr = cam_region.clamped()
+        cr_w = f"max(4,trunc(iw*{cr.w:.6f}/2)*2)"
+        cr_h = f"max(4,trunc(ih*{cr.h:.6f}/2)*2)"
+        pip_sz = 380
+        parts.append(f"{base_pad}split=2[scam][sgame]")
+        parts.append(
+            f"[sgame]crop=w='{gr_w}':h='{gr_h}':"
+            f"x='max(0,min(iw-({gr_w}),trunc(iw*{gr.x:.6f}/2)*2))':y='max(0,min(ih-({gr_h}),trunc(ih*{gr.y:.6f}/2)*2))',"
+            f"scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[bgv]"
+        )
+        if layout == "pip_circle":
+            r_px = pip_sz // 2
+            alpha_expr = f"if(lte((X-{r_px})*(X-{r_px})+(Y-{r_px})*(Y-{r_px}),{r_px - 2}*{r_px - 2}),255,0)"
+        else:
+            rad = 42
+            alpha_expr = (
+                f"if(gt(abs(X-{pip_sz/2}),{pip_sz/2 - rad})*gt(abs(Y-{pip_sz/2}),{pip_sz/2 - rad}),"
+                f"if(lte((abs(X-{pip_sz/2})-{pip_sz/2 - rad})*(abs(X-{pip_sz/2})-{pip_sz/2 - rad})+"
+                f"(abs(Y-{pip_sz/2})-{pip_sz/2 - rad})*(abs(Y-{pip_sz/2})-{pip_sz/2 - rad}),{rad}*{rad}),255,0),255)"
+            )
+        parts.append(
+            f"[scam]crop=w='{cr_w}':h='{cr_h}':"
+            f"x='max(0,min(iw-({cr_w}),trunc(iw*{cr.x:.6f}/2)*2))':y='max(0,min(ih-({cr_h}),trunc(ih*{cr.y:.6f}/2)*2))',"
+            f"scale={pip_sz}:{pip_sz}:force_original_aspect_ratio=increase,crop={pip_sz}:{pip_sz},"
+            f"format=yuva420p,geq=lum='p(X,Y)':cb='p(X,Y)':cr='p(X,Y)':a='{alpha_expr}'[pipv]"
+        )
+        parts.append("[bgv][pipv]overlay=W-w-44:76,setsar=1[vstage]")
+    elif cam_region and layout != "blur_bg":
         cam_h = int(round(1920 * max(0.2, min(0.55, split_ratio)) / 2) * 2)
         game_h = 1920 - cam_h
         cr = cam_region.clamped()
-        gr = game_region.clamped() if game_region else BlurRegion(0.2, 0.0, 0.6, 1.0)
-
         cr_w = f"max(4,trunc(iw*{cr.w:.6f}/2)*2)"
         cr_h = f"max(4,trunc(ih*{cr.h:.6f}/2)*2)"
-        gr_w = f"max(4,trunc(iw*{gr.w:.6f}/2)*2)"
-        gr_h = f"max(4,trunc(ih*{gr.h:.6f}/2)*2)"
 
         parts.append(f"{base_pad}split=2[scam][sgame]")
         parts.append(
@@ -844,15 +963,194 @@ def build_shorts_9_16_filter(
             f"x='max(0,min(iw-({gr_w}),trunc(iw*{gr.x:.6f}/2)*2))':y='max(0,min(ih-({gr_h}),trunc(ih*{gr.y:.6f}/2)*2))',"
             f"scale=1080:{game_h}:force_original_aspect_ratio=increase,crop=1080:{game_h},setsar=1[botv]"
         )
-        parts.append("[topv][botv]vstack=inputs=2[vout]")
+        parts.append(f"[topv][botv]vstack=inputs=2,drawbox=x=0:y={cam_h - 3}:w=1080:h=6:color=#8B5CF6@0.95:t=fill[vstage]")
     else:
         # Classic sleek Shorts layout: blurred ambient background + sharp centered 16:9 clip
         parts.append(f"{base_pad}split=2[bg][fg]")
         parts.append("[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,gblur=sigma=35[bgb]")
-        parts.append("[fg]scale=1080:-2:force_original_aspect_ratio=decrease[fgs]")
-        parts.append("[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1[vout]")
+        if killcam_zoom:
+            parts.append(
+                f"[fg]crop=w='{gr_w}':h='{gr_h}':"
+                f"x='max(0,min(iw-({gr_w}),trunc(iw*{gr.x:.6f}/2)*2))':y='max(0,min(ih-({gr_h}),trunc(ih*{gr.y:.6f}/2)*2))',"
+                f"scale=1080:-2:force_original_aspect_ratio=decrease[fgs]"
+            )
+        else:
+            parts.append("[fg]scale=1080:-2:force_original_aspect_ratio=decrease[fgs]")
+        parts.append("[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1[vstage]")
+
+    if progress_bar and total_duration > 1.0:
+        # Animated bottom progress bar via color source overlay
+        dur_f = max(1.0, float(total_duration))
+        parts.append(f"color=c=#A855F7:s=1080x12[pbar]")
+        parts.append(f"[vstage][pbar]overlay=x='-W+(W*t/{dur_f:.2f})':y=H-12:shortest=1[vout]")
+    else:
+        parts[-1] = parts[-1].replace("[vstage]", "[vout]")
 
     return ";".join(parts), extra_inputs
+
+
+def extract_audio_track(input_path: str, output_path: str, fmt: str = "mp3") -> Tuple[bool, str]:
+    """Extract clean audio track (.mp3 or .wav) from a video file."""
+    ffmpeg = get_ffmpeg_path()
+    if not ffmpeg or not os.path.exists(input_path):
+        return False, "FFmpeg или исходный видеофайл не найден"
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", input_path, "-vn"]
+    if fmt.lower() == "wav":
+        cmd.extend(["-c:a", "pcm_s16le", "-ar", "48000", output_path])
+    else:
+        cmd.extend(["-c:a", "libmp3lame", "-q:a", "2", output_path])
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=600, creationflags=CREATE_NO_WINDOW)
+        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            return True, output_path
+        # Fallback to AAC .m4a if libmp3lame is not compiled in
+        res2 = subprocess.run(
+            [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", input_path, "-vn", "-c:a", "aac", "-b:a", "192k", output_path],
+            capture_output=True, text=True, timeout=600, creationflags=CREATE_NO_WINDOW,
+        )
+        if res2.returncode == 0 and os.path.exists(output_path):
+            return True, output_path
+        return False, (res.stderr or "Не удалось извлечь аудио").strip()
+    except Exception as exc:
+        return False, str(exc)
+
+
+def generate_youtube_thumbnail(
+    video_or_image_path: str,
+    output_jpg: str,
+    timestamp_sec: float = 10.0,
+    headline: str = "",
+    subtitle: str = "",
+    accent_color: str = "#8B5CF6",
+    add_border: bool = True,
+    contrast_boost: float = 1.18,
+) -> Tuple[bool, str]:
+    """
+    Generate a 1280x720 YouTube / Shorts thumbnail using Pillow:
+      - Extracts frame from video (or opens image)
+      - Enhances contrast & saturation
+      - Draws sleek bottom gradient vignette, neon border, and bold stroked headline/subtitle
+    """
+    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
+
+    src_path = video_or_image_path
+    tmp_jpg = ""
+    ext = os.path.splitext(src_path)[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
+        tmp_jpg = os.path.join(tempfile.gettempdir(), f"tr_thumb_src_{uuid.uuid4().hex[:6]}.jpg")
+        ok, err = extract_frame_from_file(src_path, timestamp_sec, tmp_jpg)
+        if not ok:
+            ok, err = extract_frame_from_file(src_path, 0.5, tmp_jpg)
+        if not ok:
+            return False, err or "Не удалось извлечь кадр из видео"
+        src_path = tmp_jpg
+
+    try:
+        img = Image.open(src_path).convert("RGB")
+        # Cover-crop to 1280x720
+        tw, th = 1280, 720
+        iw, ih = img.size
+        scale = max(tw / max(1, iw), th / max(1, ih))
+        nw, nh = int(iw * scale), int(ih * scale)
+        img = img.resize((nw, nh), Image.Resampling.LANCZOS)
+        left = (nw - tw) // 2
+        top = (nh - th) // 2
+        img = img.crop((left, top, left + tw, top + th))
+
+        if contrast_boost > 1.0:
+            img = ImageEnhance.Contrast(img).enhance(contrast_boost)
+            img = ImageEnhance.Color(img).enhance(min(1.4, contrast_boost + 0.05))
+            img = ImageEnhance.Sharpness(img).enhance(1.25)
+
+        overlay = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        # Dark bottom gradient for readable typography
+        for y in range(th // 2, th):
+            alpha = int(215 * ((y - th / 2) / (th / 2)) ** 1.35)
+            draw.line([(0, y), (tw, y)], fill=(8, 9, 15, min(230, alpha)))
+
+        # Parse accent hex color
+        hx = (accent_color or "#8B5CF6").lstrip("#")
+        if len(hx) != 6:
+            hx = "8B5CF6"
+        ac_rgb = (int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16))
+
+        if add_border:
+            draw.rectangle([0, 0, tw - 1, th - 1], outline=(*ac_rgb, 255), width=10)
+            draw.rectangle([10, 10, tw - 11, th - 11], outline=(255, 255, 255, 70), width=2)
+
+        def _load_font(sz: int):
+            font_candidates = [
+                "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+                "/System/Library/Fonts/Helvetica.ttc",
+                "C:/Windows/Fonts/arialbd.ttf",
+                "C:/Windows/Fonts/segoeuib.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            ]
+            for fp in font_candidates:
+                if os.path.exists(fp):
+                    try:
+                        return ImageFont.truetype(fp, sz)
+                    except Exception:
+                        continue
+            return ImageFont.load_default()
+
+        if subtitle.strip():
+            f_sub = _load_font(36)
+            sub_txt = subtitle.strip().upper()
+            bbox = draw.textbbox((0, 0), sub_txt, font=f_sub)
+            bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            bx, by = 58, th - (195 if headline.strip() else 110)
+            draw.rounded_rectangle([bx - 16, by - 10, bx + bw + 16, by + bh + 14], radius=12, fill=(*ac_rgb, 235))
+            draw.text((bx, by), sub_txt, font=f_sub, fill=(255, 255, 255, 255))
+
+        if headline.strip():
+            f_head = _load_font(74)
+            head_txt = headline.strip().upper()
+            hx_pos, hy_pos = 56, th - 130
+            # Heavy black outline + drop shadow
+            draw.text((hx_pos + 4, hy_pos + 5), head_txt, font=f_head, fill=(0, 0, 0, 220), stroke_width=8, stroke_fill=(0, 0, 0, 220))
+            draw.text((hx_pos, hy_pos), head_txt, font=f_head, fill=(255, 255, 255, 255), stroke_width=6, stroke_fill=(10, 12, 18, 255))
+
+        out_img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+        Path(output_jpg).parent.mkdir(parents=True, exist_ok=True)
+        out_img.save(output_jpg, "JPEG", quality=95)
+        return True, output_jpg
+    except Exception as exc:
+        return False, f"Ошибка генерации обложки: {exc}"
+    finally:
+        if tmp_jpg and os.path.exists(tmp_jpg):
+            try:
+                os.remove(tmp_jpg)
+            except Exception:
+                pass
+
+
+def merge_time_intervals(
+    intervals: List[Tuple[float, float]],
+    total_dur: float,
+    pad_sec: float = 1.5,
+    min_gap_sec: float = 4.0,
+) -> List[Tuple[float, float]]:
+    """Merge and pad active banner intervals for Smart Segment Blur."""
+    cleaned = []
+    for s, e in intervals:
+        cs = max(0.0, float(s) - pad_sec)
+        ce = min(total_dur, float(e) + pad_sec) if total_dur > 0 else float(e) + pad_sec
+        if ce > cs:
+            cleaned.append((cs, ce))
+    if not cleaned:
+        return []
+    cleaned.sort()
+    merged = [cleaned[0]]
+    for s, e in cleaned[1:]:
+        ps, pe = merged[-1]
+        if s <= pe + min_gap_sec:
+            merged[-1] = (ps, max(pe, e))
+        else:
+            merged.append((s, e))
+    return [(round(s, 2), round(e, 2)) for s, e in merged]
 
 
 # ------------------------------------------------------------------ #25 Target Export Presets

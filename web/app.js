@@ -38,6 +38,8 @@
     libStats: null,
     multiCutSegments: [],
     ytMeta: null,
+    streamDigest: "",
+    lastThumbPath: "",
     activeGame: "",
     settingsDraft: null,
     update: { status: "idle", info: null, progress: 0, progress_text: "", downloaded_path: "" },
@@ -236,8 +238,9 @@
     return `
       <div class="channel-card ${rec ? "is-recording" : ""}" data-key="${esc(ch.key)}">
         <div class="ch-top">
-          <div class="ch-thumb">
+          <div class="ch-thumb ${live ? "act-watch-live" : ""}" title="${live ? "Смотреть эфир в мини-плеере без рекламы" : ""}" style="${live ? "cursor:pointer;" : ""}">
             ${thumbHtml}
+            ${live ? `<div class="media-play-hover"><div class="play-circle" style="width:34px;height:34px;">${iconSvg("play", 15)}</div></div>` : ""}
             <span class="ch-status-badge ${rec ? "rec" : (live ? "live" : "off")}">
               ${rec ? `<span class="pulse-dot"></span>ЗАПИСЬ` : (live ? `<span class="pulse-dot"></span>В ЭФИРЕ` : "ОФФЛАЙН")}
             </span>
@@ -257,7 +260,8 @@
               ? `<button class="btn btn-danger btn-sm act-stop">${iconSvg("stop", 12)}<span>Стоп</span></button>`
               : `<button class="btn ${live ? "btn-success" : "btn-subtle"} btn-sm act-rec">${iconSvg("record", 12)}<span>Запись</span></button>`}
             <div style="display:flex;gap:4px;">
-              <button class="btn-icon act-settings" title="Расписание, фильтры, чат, переподключение">${iconSvg("gear", 15)}</button>
+              ${live ? `<button class="btn-icon act-watch-live" title="Смотреть эфир без рекламы">${iconSvg("play", 14)}</button>` : ""}
+              <button class="btn-icon act-settings" title="Расписание, фильтры, чат, авто-клипы">${iconSvg("gear", 15)}</button>
               <button class="btn-icon danger act-del" title="Удалить канал">${iconSvg("trash", 15)}</button>
             </div>
           </div>
@@ -266,7 +270,10 @@
         ${rec ? `
           <div class="ch-rec-strip">
             <span class="ch-rec-stats" data-tel-key="${esc(ch.key)}">${esc(tel.state || "Запись")} · ${esc(tel.dur || "00:00:00")} · ${esc(tel.size || "0 КБ")} · ${esc(tel.speed || "1.0x")}</span>
-            <button class="btn btn-soft btn-sm act-marker" title="Поставить маркер хайлайта (также F9)">${iconSvg("bookmark", 13)}<span>Маркер</span></button>
+            <div style="display:flex;gap:6px;">
+              <button class="btn btn-subtle btn-sm act-dvr" title="Откат: сохранить последние 60 секунд эфира в AutoClips/">${iconSvg("scissors", 13)}<span>Откат 60с</span></button>
+              <button class="btn btn-soft btn-sm act-marker" title="Поставить маркер хайлайта (также ${esc(state.config.marker_hotkey || "F9")})">${iconSvg("bookmark", 13)}<span>Маркер</span></button>
+            </div>
           </div>
         ` : ""}
 
@@ -307,6 +314,10 @@
       card.querySelector(".act-rec")?.addEventListener("click", () => callBackend("startRecording", key));
       card.querySelector(".act-stop")?.addEventListener("click", () => callBackend("stopRecording", key));
       card.querySelector(".act-marker")?.addEventListener("click", () => callBackend("dropMarker", key));
+      card.querySelector(".act-dvr")?.addEventListener("click", () => callBackend("clipLastSeconds", key, 60));
+      card.querySelectorAll(".act-watch-live").forEach((el) => {
+        el.addEventListener("click", () => openLiveStreamPlayer(ch));
+      });
       card.querySelector(".act-del")?.addEventListener("click", async () => {
         const raw = await callBackend("deleteChannel", key);
         if (applyChannelsReturn) applyChannelsReturn(raw);
@@ -555,6 +566,7 @@
               <div class="media-actions">
                 <button class="btn btn-soft btn-sm act-to-blur" data-path="${esc(f.path)}">${iconSvg("blur", 13)}<span>Блюр</span></button>
                 <button class="btn btn-subtle btn-sm act-to-studio" data-path="${esc(f.path)}">${iconSvg("scissors", 13)}<span>Монтаж</span></button>
+                <button class="btn-icon act-tg-pub" data-path="${esc(f.path)}" data-name="${esc(f.name)}" title="Опубликовать в Telegram">${iconSvg("bell", 14)}</button>
                 <button class="btn-icon act-reveal" data-path="${esc(f.path)}" title="Показать в проводнике">${iconSvg("folder", 14)}</button>
                 <button class="btn-icon danger act-rm" data-path="${esc(f.path)}" data-name="${esc(f.name)}" title="Удалить">${iconSvg("trash", 14)}</button>
               </div>
@@ -578,6 +590,9 @@
     });
     wrap.querySelectorAll(".act-reveal").forEach((el) => {
       el.onclick = () => callBackend("openInExplorer", el.dataset.path);
+    });
+    wrap.querySelectorAll(".act-tg-pub").forEach((el) => {
+      el.onclick = () => callBackend("publishVideoToTelegram", el.dataset.path, `🎬 ${el.dataset.name}`);
     });
     wrap.querySelectorAll(".act-rm").forEach((el) => {
       el.onclick = () => {
@@ -730,7 +745,8 @@
         <button data-sub="trim" class="${state.studioSub === "trim" ? "active" : ""}">Обрезка / Склейка / AFK</button>
         <button data-sub="shorts" class="${state.studioSub === "shorts" ? "active" : ""}">Shorts / TikTok 9:16</button>
         <button data-sub="highlights" class="${state.studioSub === "highlights" ? "active" : ""}">Хайлайты и Чат</button>
-        <button data-sub="ai" class="${state.studioSub === "ai" ? "active" : ""}">AI Субтитры и Цензура</button>
+        <button data-sub="ai" class="${state.studioSub === "ai" ? "active" : ""}">AI Субтитры и Конспект</button>
+        <button data-sub="thumbnail" class="${state.studioSub === "thumbnail" ? "active" : ""}">Обложка YouTube</button>
         <button data-sub="export" class="${state.studioSub === "export" ? "active" : ""}">Экспорт и Звук</button>
       </div>
 
@@ -785,9 +801,11 @@
         <div class="card">
           <div class="form-grid-2" style="margin-bottom:14px;">
             <div class="field">
-              <label>Компоновка 9:16 (1080×1920)</label>
+              <label>Шаблон компоновки 9:16 (1080×1920)</label>
               <select class="input-select" id="shortsMode">
-                <option value="split">Вебка сверху + Геймплей снизу</option>
+                <option value="split">Вебка сверху + Геймплей снизу (с неоновой линией)</option>
+                <option value="pip_circle">Круглая вебка (PiP) поверх геймплея</option>
+                <option value="pip_rounded">Скруглённая вебка (PiP) поверх геймплея</option>
                 <option value="blur_bg">Видео по центру + размытый фон</option>
               </select>
             </div>
@@ -799,7 +817,11 @@
               </select>
             </div>
           </div>
-          <div class="input-row">
+          <div class="input-row" style="margin-bottom:14px;flex-wrap:wrap;">
+            <label class="switch-inline"><input type="checkbox" id="shortsProgBar" checked/><span class="switch-track"></span><span>Анимированный прогресс-бар снизу</span></label>
+            <label class="switch-inline"><input type="checkbox" id="shortsKillcam"/><span class="switch-track"></span><span>Killcam 1.35x зум на прицел/центр</span></label>
+          </div>
+          <div class="input-row" style="flex-wrap:wrap;">
             <button class="btn btn-soft" id="btnPickShortsZones">${iconSvg("crop", 15)}<span>Выделить Вебку (1) и Геймплей (2) на видео</span></button>
             <div style="flex:1"></div>
             <button class="btn btn-primary" id="btnRunShorts">${iconSvg("smartphone", 15)}<span>Создать Shorts 9:16</span></button>
@@ -812,6 +834,7 @@
             <button class="btn btn-subtle" id="btnPickChat">${iconSvg("folder", 15)}<span>Чат JSON</span></button>
             <button class="btn btn-primary" id="btnScanChat">${iconSvg("flame", 15)}<span>Анализ чата</span></button>
             <button class="btn btn-soft" id="btnScanAudio">${iconSvg("volume", 15)}<span>Громкие моменты</span></button>
+            <button class="btn btn-soft" id="btnScanEvents" title="Поиск смеха, криков и выстрелов (900–3800 Гц)">${iconSvg("sparkles", 15)}<span>Смех / Выстрелы</span></button>
             <button class="btn btn-subtle" id="btnBurnChat">${iconSvg("video", 15)}<span>Вшить чат</span></button>
           </div>
           <div class="input-row" style="margin-bottom:12px;flex-wrap:wrap;">
@@ -819,6 +842,7 @@
             <button class="btn btn-subtle btn-sm" id="btnFetchVodChat">${iconSvg("download", 14)}<span>Скачать чат VOD</span></button>
             ${state.highlights.highlights.length > 0 ? `
               <button class="btn btn-subtle btn-sm" id="btnExportEdl">${iconSvg("save", 14)}<span>Экспорт .EDL</span></button>
+              <button class="btn btn-soft btn-sm" id="btnBatchShortsHl" title="Авто-нарезка всех хайлайтов сразу в вертикальные Shorts 9:16">${iconSvg("smartphone", 14)}<span>Все в Shorts 9:16 (${state.highlights.highlights.length})</span></button>
               <button class="btn btn-success btn-sm" id="btnBatchCutHl">${iconSvg("scissors", 14)}<span>Нарезать все (${state.highlights.highlights.length})</span></button>
             ` : ""}
           </div>
@@ -842,9 +866,12 @@
               </select>
             </div>
             <div class="field">
-              <label>Язык</label>
+              <label>Язык и Перевод</label>
               <select class="input-select" id="aiLang">
-                <option value="ru">Русский (ru)</option><option value="en">English (en)</option><option value="auto">Авто</option>
+                <option value="ru">Русский (ru)</option>
+                <option value="en">English (en)</option>
+                <option value="translate_en">Перевод RU → EN субтитры</option>
+                <option value="auto">Авто</option>
               </select>
             </div>
             <div class="field"><label>Караоке-субтитры</label><label class="switch-inline" style="margin-top:6px;"><input type="checkbox" id="aiBurn" checked/><span class="switch-track"></span><span>Вшить (Shorts Pop)</span></label></div>
@@ -864,8 +891,18 @@
             <button class="btn btn-primary" id="btnAiSubs">${iconSvg("sparkles", 15)}<span>Караоке-субтитры Shorts</span></button>
             <button class="btn btn-danger" id="btnAiCensor">${iconSvg("volume", 15)}<span>Запикать запрещённые слова</span></button>
             <div style="flex:1"></div>
+            <button class="btn btn-subtle" id="btnGenDigest">${iconSvg("bookmark", 15)}<span>AI Конспект стрима</span></button>
             <button class="btn btn-soft" id="btnGenYtMeta">${iconSvg("film", 15)}<span>AI Заголовки и Таймкоды YouTube</span></button>
           </div>
+          ${state.streamDigest ? `
+            <div class="yt-meta-box">
+              <div class="input-row" style="justify-content:space-between;">
+                <span style="font-weight:700;font-size:13px;">AI Конспект / Саммари эфира</span>
+                <button class="btn btn-subtle btn-sm" id="btnCopyDigest">${iconSvg("copy", 13)}<span>Копировать конспект</span></button>
+              </div>
+              <textarea readonly style="min-height:130px;">${esc(state.streamDigest)}</textarea>
+            </div>
+          ` : ""}
           ${state.ytMeta ? `
             <div class="yt-meta-box">
               <div class="input-row" style="justify-content:space-between;">
@@ -875,6 +912,43 @@
               <div class="field"><label>Варианты заголовков</label><textarea readonly>${esc((state.ytMeta.titles || []).join("\n"))}</textarea></div>
               <div class="field"><label>Описание и таймкоды</label><textarea readonly>${esc(state.ytMeta.description || "")}</textarea></div>
               <div class="field"><label>Теги</label><input class="input" readonly value="${esc(state.ytMeta.tags || "")}" /></div>
+            </div>
+          ` : ""}
+        </div>
+      ` : state.studioSub === "thumbnail" ? `
+        <div class="card">
+          <div class="form-grid-3" style="margin-bottom:12px;">
+            <div class="field">
+              <label>Крупный заголовок на обложке</label>
+              <input class="input" id="thHeadline" placeholder="ЛУЧШИЙ КЛАТЧ ГОДА!" />
+            </div>
+            <div class="field">
+              <label>Плашка-подзаголовок сверху</label>
+              <input class="input" id="thSubtitle" placeholder="SKYWHYWALKER · GTA VI" />
+            </div>
+            <div class="field">
+              <label>Таймкод кадра (сек) и Цвет акцента</label>
+              <div class="input-row">
+                <input type="number" class="input mono" id="thTimeSec" value="15" min="0" style="width:95px;" />
+                <select class="input-select" id="thAccent">
+                  <option value="#8B5CF6">Фиолетовый неон</option>
+                  <option value="#EF4444">Красный YouTube</option>
+                  <option value="#22C55E">Изумрудный</option>
+                  <option value="#3B82F6">Кибер-синий</option>
+                  <option value="#F59E0B">Золотой</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="input-row" style="flex-wrap:wrap;">
+            <label class="switch-inline"><input type="checkbox" id="thBorder" checked/><span class="switch-track"></span><span>Неоновая рамка по контуру</span></label>
+            <div style="flex:1"></div>
+            <button class="btn btn-primary" id="btnCreateThumb">${iconSvg("camera", 15)}<span>Сгенерировать обложку 1280×720 (.JPG)</span></button>
+          </div>
+          ${state.lastThumbPath ? `
+            <div style="margin-top:14px;display:flex;flex-direction:column;gap:8px;align-items:flex-start;">
+              <img src="${mediaUrl(state.lastThumbPath)}&t=${Date.now()}" style="max-width:440px;border-radius:10px;border:1px solid var(--border);" alt="Thumbnail" />
+              <button class="btn btn-subtle btn-sm" id="btnRevealThumb">${iconSvg("folder", 14)}<span>Показать обложку в папке</span></button>
             </div>
           ` : ""}
         </div>
@@ -899,6 +973,8 @@
             <label class="switch-inline"><input type="checkbox" id="expNorm" checked/><span class="switch-track"></span><span>Нормализация EBU R128</span></label>
             <label class="switch-inline"><input type="checkbox" id="expVoice"/><span class="switch-track"></span><span>Усиление голоса (Compressor + Highpass)</span></label>
             <div style="flex:1"></div>
+            <button class="btn btn-subtle" id="btnExtractMp3">${iconSvg("volume", 15)}<span>Извлечь .MP3 подкаст</span></button>
+            <button class="btn btn-soft" id="btnPubTgNow">${iconSvg("bell", 15)}<span>В Telegram</span></button>
             <button class="btn btn-primary" id="btnDoExport">${iconSvg("download", 15)}<span>Экспортировать</span></button>
           </div>
         </div>
@@ -977,14 +1053,17 @@
     $("#btnRunShorts")?.addEventListener("click", () => {
       if (!state.studioFile) return showToast("Выберите видео", "", "error");
       const mode = $("#shortsMode").value;
-      const out = appendFileSuffix(state.studioFile, "_shorts_9x16", ".mp4");
+      const out = appendFileSuffix(state.studioFile, `_shorts_${mode}`, ".mp4");
       callBackend("runStudioAction", JSON.stringify({
         action: "shorts", title: "Рендер Shorts 9:16", subtitle: "1080×1920",
         params: {
           input_path: state.studioFile, output_path: out,
-          cam_region: mode === "split" ? (state.shortsCam || { x: 0.02, y: 0.55, w: 0.28, h: 0.35 }) : null,
-          game_region: mode === "split" ? (state.shortsGame || { x: 0.22, y: 0.05, w: 0.56, h: 0.90 }) : null,
+          layout: mode,
+          cam_region: mode !== "blur_bg" ? (state.shortsCam || { x: 0.02, y: 0.55, w: 0.28, h: 0.35 }) : null,
+          game_region: mode !== "blur_bg" ? (state.shortsGame || { x: 0.22, y: 0.05, w: 0.56, h: 0.90 }) : null,
           blur_channel_key: $("#shortsBlurCh").value,
+          progress_bar: $("#shortsProgBar")?.checked !== false,
+          killcam_zoom: !!$("#shortsKillcam")?.checked,
         }
       }));
     });
@@ -1005,6 +1084,11 @@
       callBackend("analyzeHighlights", "audio", state.studioFile);
       showToast("Анализ звука", "Ищем громкие моменты...", "info");
     });
+    $("#btnScanEvents")?.addEventListener("click", () => {
+      if (!state.studioFile) return showToast("Выберите видео", "", "error");
+      callBackend("analyzeHighlights", "events", state.studioFile);
+      showToast("AI Детектор эмоций", "Ищем смех, крики и выстрелы...", "info");
+    });
     $("#btnFetchVodChat")?.addEventListener("click", () => {
       const url = $("#hlVodUrl").value.trim();
       if (!url) return showToast("Чат VOD", "Вставьте ссылку на Twitch VOD", "error");
@@ -1020,6 +1104,21 @@
       callBackend("runStudioAction", JSON.stringify({
         action: "batch_highlights", title: `Пакет хайлайтов (${tsList.length} шт.)`, subtitle: state.studioFile.split(/[\\/]/).pop(),
         params: { input_path: state.studioFile, timestamps: tsList, pad_sec: 20 }
+      }));
+    });
+    $("#btnBatchShortsHl")?.addEventListener("click", () => {
+      if (!state.studioFile) return showToast("Выберите видео", "", "error");
+      const tsList = (state.highlights.highlights || []).map((h) => h.timestamp_sec);
+      if (!tsList.length) return;
+      callBackend("runStudioAction", JSON.stringify({
+        action: "batch_shorts", title: `Пакет Shorts 9:16 (${tsList.length} шт.)`, subtitle: state.studioFile.split(/[\\/]/).pop(),
+        params: {
+          input_path: state.studioFile, timestamps: tsList, pad_sec: 20,
+          layout: "split",
+          cam_region: state.shortsCam || { x: 0.02, y: 0.55, w: 0.28, h: 0.35 },
+          game_region: state.shortsGame || { x: 0.22, y: 0.05, w: 0.56, h: 0.90 },
+          progress_bar: true,
+        }
       }));
     });
     $("#btnBurnChat")?.addEventListener("click", () => {
@@ -1049,27 +1148,64 @@
 
     // AI Whisper + YouTube SEO (#20, #26, #30)
     $("#btnAiSubs")?.addEventListener("click", () => {
+      const langVal = $("#aiLang").value;
+      const isTranslate = langVal === "translate_en";
       callBackend("runStudioAction", JSON.stringify({
-        action: "subtitles", title: "Whisper Караоке-субтитры", subtitle: `Модель ${$("#aiModel").value}`,
-        input_path: state.studioFile, model: $("#aiModel").value, language: $("#aiLang").value,
+        action: "subtitles", title: isTranslate ? "Whisper Перевод RU → EN" : "Whisper Караоке-субтитры", subtitle: `Модель ${$("#aiModel").value}`,
+        input_path: state.studioFile, model: $("#aiModel").value,
+        language: isTranslate ? "ru" : langVal,
+        task: isTranslate ? "translate" : "transcribe",
         burn_subtitles: $("#aiBurn").checked, shorts_style: true, whisper_prompt: $("#aiPrompt").value.trim(),
       }));
     });
     $("#btnAiCensor")?.addEventListener("click", () => {
+      const langVal = $("#aiLang").value;
       callBackend("runStudioAction", JSON.stringify({
         action: "censor", title: "AI Аудио-цензура", subtitle: `Модель ${$("#aiModel").value}`,
-        input_path: state.studioFile, model: $("#aiModel").value, language: $("#aiLang").value,
+        input_path: state.studioFile, model: $("#aiModel").value, language: langVal === "translate_en" ? "ru" : langVal,
         banned_words: $("#aiBanned").value, censor_beep: $("#aiBeep").checked, whisper_prompt: $("#aiPrompt").value.trim(),
       }));
     });
     $("#btnGenYtMeta")?.addEventListener("click", () => {
       callBackend("generateYouTubeMeta", state.studioFile);
     });
+    $("#btnGenDigest")?.addEventListener("click", () => {
+      if (!state.studioFile) return showToast("Выберите видео", "", "error");
+      callBackend("generateStreamDigest", state.studioFile);
+      showToast("AI Конспект", "Анализируем запись, маркеры и чат...", "info");
+    });
+    $("#btnCopyDigest")?.addEventListener("click", () => {
+      if (!state.streamDigest) return;
+      navigator.clipboard?.writeText(state.streamDigest);
+      showToast("Скопировано", "Конспект стрима в буфере обмена", "success");
+    });
     $("#btnCopyYtMeta")?.addEventListener("click", () => {
       if (!state.ytMeta) return;
       const txt = `${(state.ytMeta.titles || []).join("\n")}\n\n${state.ytMeta.description || ""}\n\nТеги: ${state.ytMeta.tags || ""}`;
       navigator.clipboard?.writeText(txt);
       showToast("Скопировано", "Заголовки, описание и теги в буфере обмена", "success");
+    });
+
+    // Thumbnail Maker
+    $("#btnCreateThumb")?.addEventListener("click", async () => {
+      if (!state.studioFile) return showToast("Выберите видео", "", "error");
+      const raw = await callBackend("createThumbnail", JSON.stringify({
+        video_path: state.studioFile,
+        timestamp_sec: parseSec($("#thTime")?.value) ?? 15,
+        headline: $("#thHeadline")?.value.trim() || "ЛУЧШИЙ МОМЕНТ СТРИМА",
+        subtitle: $("#thSubtitle")?.value.trim() || "TWITCH HIGHLIGHTS",
+        accent_color: $("#thAccent")?.value || "#8b5cf6",
+      }));
+      try {
+        const res = JSON.parse(raw || "{}");
+        if (res.ok && res.output_path) {
+          state.lastThumbPath = res.output_path;
+          renderStudioPage();
+        }
+      } catch {}
+    });
+    $("#btnRevealThumb")?.addEventListener("click", () => {
+      if (state.lastThumbPath) callBackend("openInExplorer", state.lastThumbPath);
     });
 
     // Export (#23, #24)
@@ -1090,6 +1226,18 @@
           watermark_path: $("#expWmPath").value.trim(),
         }
       }));
+    });
+    $("#btnExtractMp3")?.addEventListener("click", () => {
+      if (!state.studioFile) return showToast("Выберите видео", "", "error");
+      const out = appendFileSuffix(state.studioFile, "_audio", ".mp3");
+      callBackend("runStudioAction", JSON.stringify({
+        action: "extract_audio", title: "Извлечение MP3 дорожки", subtitle: state.studioFile.split(/[\\/]/).pop(),
+        params: { input_path: state.studioFile, output_path: out, format: "mp3" }
+      }));
+    });
+    $("#btnPubTgNow")?.addEventListener("click", () => {
+      if (!state.studioFile) return showToast("Выберите видео", "", "error");
+      callBackend("publishVideoToTelegram", state.studioFile, "");
     });
 
     bindJobEvents(root);
@@ -1169,6 +1317,10 @@
           </div>
           <div class="field"><label>Качество CQ/CRF (23 оптимум)</label><input type="number" class="input" id="cfgCq" value="${c.video_quality || 23}" /></div>
           <div class="field"><label>Лимит одноврем. рендеров GPU</label><input type="number" class="input" id="cfgMaxBlurs" value="${c.max_concurrent_blurs || 1}" min="1" max="6" /></div>
+        </div>
+        <div class="setting-row">
+          <div><div class="setting-row-title">Smart Segment Blur (умный точечный блюр)</div><div class="setting-row-desc">Перекодирует ТОЛЬКО секунды, где виден баннер, а остальной стрим копирует без потерь (в 5–10 раз быстрее)</div></div>
+          <label class="switch-inline"><input type="checkbox" id="cfgSmartBlur" ${c.smart_segment_blur !== false ? "checked" : ""}/><span class="switch-track"></span></label>
         </div>
         <div class="setting-row">
           <div><div class="setting-row-title">Hard Disk Guard (авто-стоп при нехватке места)</div><div class="setting-row-desc">Блокирует новые записи и безопасно останавливает текущие, если свободно меньше порога</div></div>
@@ -1273,6 +1425,20 @@
           </div>
           <label class="switch-inline"><input type="checkbox" id="cfgTgBot" ${c.telegram_bot_enabled ? "checked" : ""}/><span class="switch-track"></span></label>
         </div>
+        <div class="setting-row" style="margin-bottom:12px;">
+          <div>
+            <div class="setting-row-title">Авто-публикация готовых Shorts и экспортов в Telegram</div>
+            <div class="setting-row-desc">Автоматически отправлять отрендеренные в Студии ролики (&lt;50 МБ) прямо в ваш Telegram-чат</div>
+          </div>
+          <label class="switch-inline"><input type="checkbox" id="cfgAutoPubTg" ${c.auto_publish_telegram ? "checked" : ""}/><span class="switch-track"></span></label>
+        </div>
+        <div class="setting-row" style="margin-bottom:12px;">
+          <div>
+            <div class="setting-row-title">Нативные системные уведомления ${isMac ? "macOS Notification Center" : "Windows"} со звуком</div>
+            <div class="setting-row-desc">Показывать всплывающие баннеры ОС при старте эфира, авто-клипах и завершении блюра</div>
+          </div>
+          <label class="switch-inline"><input type="checkbox" id="cfgNativeOsNotif" ${c.native_os_notifications !== false ? "checked" : ""}/><span class="switch-track"></span></label>
+        </div>
         <div class="field" style="margin-bottom:14px;">
           <label>Discord Webhook URL</label>
           <input class="input" id="cfgDcWh" value="${esc(c.discord_webhook_url || "")}" placeholder="https://discord.com/api/webhooks/..." />
@@ -1310,8 +1476,8 @@
           <label class="switch-inline"><input type="checkbox" id="cfgAutostart" ${c.start_with_windows ? "checked" : ""}/><span class="switch-track"></span></label>
         </div>
         <div class="setting-row">
-          <div><div class="setting-row-title">Глобальная клавиша маркера хайлайта</div><div class="setting-row-desc">${isMac ? "Доступно только в Windows (в macOS используйте кнопку «Маркер» на карточке)" : "Работает даже поверх полноэкранных игр"}</div></div>
-          <select class="input-select compact" id="cfgHotkey" ${isMac ? "disabled" : ""}>
+          <div><div class="setting-row-title">Глобальная клавиша маркера хайлайта</div><div class="setting-row-desc">Работает на Windows и macOS даже поверх полноэкранных игр и браузера</div></div>
+          <select class="input-select compact" id="cfgHotkey">
             ${Array.from({ length: 12 }, (_, i) => `F${i + 1}`).map((k) => `<option ${c.marker_hotkey === k ? "selected" : ""}>${k}</option>`).join("")}
           </select>
         </div>
@@ -1320,6 +1486,28 @@
           <div class="input-row">
             <button class="btn btn-subtle btn-sm" id="btnExportProf">${iconSvg("download", 14)}<span>Экспорт .zip</span></button>
             <button class="btn btn-soft btn-sm" id="btnImportProf">${iconSvg("folder", 14)}<span>Импорт .zip</span></button>
+          </div>
+        </div>
+        <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px;">
+          <div class="setting-row-title" style="margin-bottom:4px;">Облачная синхронизация профиля и сцен блюра (iCloud / Dropbox / GitHub Gist)</div>
+          <div class="setting-row-desc" style="margin-bottom:10px;">Синхронизирует каналы и зоны блюра в 1 клик между вашим Mac и ПК</div>
+          <div class="form-grid-2" style="margin-bottom:10px;">
+            <div class="field">
+              <label>Облачная папка (iCloud Drive / Dropbox / Google Drive)</label>
+              <div class="input-row">
+                <input class="input" id="cfgCloudPath" value="${esc(c.cloud_sync_path || "")}" placeholder="/Users/.../iCloud Drive/TwitchRecorder" />
+                <button class="btn btn-subtle btn-sm" id="btnPickCloudDir">${iconSvg("folder", 14)}</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>GitHub Gist Token (опционально, scope: gist)</label>
+              <input type="password" class="input" id="cfgGistTok" value="${esc(c.cloud_gist_token || "")}" placeholder="ghp_..." />
+            </div>
+          </div>
+          <div class="input-row">
+            <button class="btn btn-primary btn-sm" id="btnCloudPush">${iconSvg("upload", 14)}<span>Выгрузить профиль в облако</span></button>
+            <button class="btn btn-soft btn-sm" id="btnCloudPull">${iconSvg("download", 14)}<span>Загрузить профиль из облака</span></button>
+            ${c.cloud_gist_id ? `<span class="mono" style="font-size:11px;color:var(--text-muted);">Gist ID: ${esc(c.cloud_gist_id)}</span>` : ""}
           </div>
         </div>
       </div>
@@ -1350,6 +1538,7 @@
       check_interval_sec: Math.max(10, Number($("#cfgInterval").value) || 30),
       vod_concurrent_fragments: Math.max(1, Number($("#cfgVodFrag").value) || 4),
       min_free_gb: Math.max(1, Number($("#cfgMinGb").value) || 15),
+      smart_segment_blur: $("#cfgSmartBlur").checked,
       hard_disk_guard: $("#cfgDiskGuard").checked,
       encoder: $("#cfgEnc").value,
       video_quality: Number($("#cfgCq").value) || 23,
@@ -1377,6 +1566,8 @@
       telegram_bot_token: $("#cfgTgTok").value.trim(),
       telegram_chat_id: $("#cfgTgChat").value.trim(),
       telegram_bot_enabled: $("#cfgTgBot").checked,
+      auto_publish_telegram: $("#cfgAutoPubTg").checked,
+      native_os_notifications: $("#cfgNativeOsNotif").checked,
       discord_webhook_url: $("#cfgDcWh").value.trim(),
       notify_on_live: $("#cfgNLive").checked,
       notify_on_finish: $("#cfgNFin").checked,
@@ -1386,6 +1577,8 @@
       minimize_to_tray: $("#cfgTray").checked,
       start_with_windows: $("#cfgAutostart").checked,
       marker_hotkey: $("#cfgHotkey").value,
+      cloud_sync_path: $("#cfgCloudPath")?.value.trim() || "",
+      cloud_gist_token: $("#cfgGistTok")?.value.trim() || "",
       github_repo: $("#cfgGhRepo").value.trim(),
       auto_check_updates: $("#cfgAutoUpd").checked,
     });
@@ -1393,6 +1586,25 @@
     $("#cfgTheme").onchange = (e) => { applyTheme(e.target.value); };
     $("#btnExportProf").onclick = () => callBackend("exportProfileZip");
     $("#btnImportProf").onclick = () => callBackend("importProfileZip");
+    $("#btnPickCloudDir")?.addEventListener("click", async () => {
+      const folder = await callBackend("pickFolder");
+      if (folder && $("#cfgCloudPath")) {
+        $("#cfgCloudPath").value = folder;
+        state.settingsDraft.cloud_sync_path = folder;
+      }
+    });
+    $("#btnCloudPush")?.addEventListener("click", async () => {
+      const data = collectSettings();
+      state.settingsDraft = { ...data };
+      await callBackend("saveSettings", JSON.stringify(data));
+      await callBackend("syncCloudProfile", "push");
+    });
+    $("#btnCloudPull")?.addEventListener("click", async () => {
+      const data = collectSettings();
+      state.settingsDraft = { ...data };
+      await callBackend("saveSettings", JSON.stringify(data));
+      await callBackend("syncCloudProfile", "pull");
+    });
 
     root.querySelectorAll("#setSubnav button").forEach((b) => {
       b.onclick = () => {
@@ -1667,13 +1879,18 @@
         fx.style.opacity = "0.94";
       }
       if (r.mode === "image" && r.image_path) {
-        fx.innerHTML = `<img src="${mediaUrl(r.image_path)}" draggable="false"/>`;
+        const ext = (r.image_path.split(".").pop() || "").toLowerCase();
+        if (["mp4", "webm", "mov"].includes(ext)) {
+          fx.innerHTML = `<video src="${mediaUrl(r.image_path)}" autoplay loop muted playsinline style="width:100%;height:100%;object-fit:fill;pointer-events:none;"></video>`;
+        } else {
+          fx.innerHTML = `<img src="${mediaUrl(r.image_path)}" draggable="false"/>`;
+        }
       }
       box.appendChild(fx);
 
       const tag = document.createElement("div");
       tag.className = "blur-box-tag";
-      tag.textContent = `#${idx + 1} ${r.label || "Баннер"}${r.auto_detect ? " [AI]" : ""}`;
+      tag.textContent = `#${idx + 1} ${r.label || "Баннер"}${r.auto_detect ? (r.track_motion ? " [AI+Track]" : " [AI]") : ""}`;
       box.appendChild(tag);
 
       ["tl", "tr", "bl", "br"].forEach((h) => {
@@ -1712,6 +1929,7 @@
     $("#bsModeSeg").querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.mode === (r.mode || "blur")));
     $("#bsLogoField").classList.toggle("hidden", r.mode !== "image");
     $("#bsLogoPath").value = r.image_path || "";
+    if ($("#bsChromaKey")) $("#bsChromaKey").checked = !!r.chromakey;
     $("#bsStrengthField").classList.toggle("hidden", r.mode === "solid" || r.mode === "image");
     $("#bsFeatherField").classList.toggle("hidden", r.mode === "solid" || r.mode === "image");
     $("#bsStrength").value = r.strength ?? 25;
@@ -1721,6 +1939,7 @@
     $("#bsStartSec").value = r.start_sec != null ? r.start_sec : "";
     $("#bsEndSec").value = r.end_sec != null ? r.end_sec : "";
     $("#bsAutoDetect").checked = !!r.auto_detect;
+    if ($("#bsTrackMotion")) $("#bsTrackMotion").checked = !!r.track_motion;
     $("#bsTplStatus").textContent = r.template_path ? `Образец: ${r.template_path.split(/[\\/]/).pop()}` : "Блюрит только когда баннер в кадре";
   }
 
@@ -1848,9 +2067,12 @@
       b.onclick = () => { if (bs.regions[bs.selected]) { bs.regions[bs.selected].mode = b.dataset.mode; renderBsZones(); } };
     });
     $("#bsPickLogo").onclick = async () => {
-      const p = await callBackend("pickFile", "Картинки (*.png *.jpg *.jpeg *.webp)");
+      const p = await callBackend("pickFile", "Медиа и картинки (*.png *.jpg *.jpeg *.webp *.gif *.mp4 *.webm)");
       if (p && bs.regions[bs.selected]) { bs.regions[bs.selected].image_path = p; renderBsZones(); }
     };
+    $("#bsChromaKey")?.addEventListener("change", (e) => {
+      if (bs.regions[bs.selected]) bs.regions[bs.selected].chromakey = e.target.checked;
+    });
     $("#bsStrength").oninput = (e) => { if (bs.regions[bs.selected]) { bs.regions[bs.selected].strength = Number(e.target.value); renderBsZones(); } };
     $("#bsFeather").oninput = (e) => { if (bs.regions[bs.selected]) { bs.regions[bs.selected].feather = Number(e.target.value); renderBsZones(); } };
     const syncStartSec = (e) => { if (bs.regions[bs.selected]) bs.regions[bs.selected].start_sec = parseSec(e.target.value); };
@@ -1860,6 +2082,9 @@
     $("#bsEndSec").oninput = syncEndSec;
     $("#bsEndSec").onchange = syncEndSec;
     $("#bsAutoDetect").onchange = (e) => { if (bs.regions[bs.selected]) { bs.regions[bs.selected].auto_detect = e.target.checked; renderBsZones(); } };
+    $("#bsTrackMotion")?.addEventListener("change", (e) => {
+      if (bs.regions[bs.selected]) { bs.regions[bs.selected].track_motion = e.target.checked; renderBsZones(); }
+    });
     $("#bsSaveTpl").onclick = async () => {
       const r = bs.regions[bs.selected];
       if (!r || !bs.mediaPath) return showToast("Нужен кадр", "Сначала загрузите кадр со стрима или видео", "error");
@@ -1958,8 +2183,18 @@
         <div class="setting-row"><div><div class="setting-row-title">Параллельная запись чата Twitch</div><div class="setting-row-desc">Создаёт .chat.json и .chat.ass для хайлайтов</div></div><label class="switch-inline"><input type="checkbox" id="cdChat" ${ch.record_chat ? "checked" : ""}/><span class="switch-track"></span></label></div>
         <div class="setting-row"><div><div class="setting-row-title">Пропуск рекламы Twitch</div><div class="setting-row-desc">Флаг --twitch-disable-ads</div></div><label class="switch-inline"><input type="checkbox" id="cdAds" ${ch.disable_ads ? "checked" : ""}/><span class="switch-track"></span></label></div>
         <div class="setting-row"><div><div class="setting-row-title">Сохранять исходник после блюра</div><div class="setting-row-desc">Не удалять _raw файл после постобработки</div></div><label class="switch-inline"><input type="checkbox" id="cdKeep" ${ch.keep_original ? "checked" : ""}/><span class="switch-track"></span></label></div>
+        <div class="setting-row"><div><div class="setting-row-title">Авто-сцена блюра по названию игры</div><div class="setting-row-desc">Автоматически переключает сцену блюра, если название совпадает с игрой на стриме</div></div><label class="switch-inline"><input type="checkbox" id="cdAutoScene" ${ch.auto_scene_by_game !== false ? "checked" : ""}/><span class="switch-track"></span></label></div>
+        <div class="setting-row"><div><div class="setting-row-title">Сохранять отдельную MP3-дорожку (подкаст)</div><div class="setting-row-desc">Авто-извлечение чистого аудио .mp3 сразу после записи</div></div><label class="switch-inline"><input type="checkbox" id="cdSepAudio" ${ch.separate_audio_track ? "checked" : ""}/><span class="switch-track"></span></label></div>
+        <div class="setting-row">
+          <div><div class="setting-row-title">Авто-клиппер 45с при взрыве чата (Hype Spike)</div><div class="setting-row-desc">Автоматически вырезает последние 45 сек в AutoClips/, когда чат превышает порог сообщ./10с</div></div>
+          <div class="input-row">
+            <input type="number" class="input" style="width:74px;" id="cdClipThr" value="${ch.auto_clip_threshold || 18}" min="5" max="200" title="Сообщений за 10 сек"/>
+            <label class="switch-inline"><input type="checkbox" id="cdAutoClip" ${ch.live_auto_clip ? "checked" : ""}/><span class="switch-track"></span></label>
+          </div>
+        </div>
         <div class="setting-row"><div><div class="setting-row-title">Разбивка по частям (минут)</div><div class="setting-row-desc">0 = одним непрерывным файлом</div></div><input type="number" class="input" style="width:95px;" id="cdSeg" value="${ch.segment_minutes || 0}" min="0" max="720"/></div>
       </div>
+      <div class="field"><label>Ключевые слова в чате для авто-маркера хайлайта (через запятую)</label><input class="input" id="cdTrigWords" value="${esc(ch.chat_trigger_words || "")}" placeholder="КЛАТЧ, ОРУ, ЭЙС, CLIP, КЛИП"/></div>
       <div class="field"><label>Фильтр категорий / игр (через запятую, пусто = все)</label><input class="input" id="cdCat" value="${esc(ch.category_filter || "")}" placeholder="Just Chatting, Counter-Strike 2"/></div>
       <div class="field"><label>Обязательные слова в названии стрима</label><input class="input" id="cdTitle" value="${esc(ch.title_filter || "")}" placeholder="турнир, марафон"/></div>
       <div>
@@ -1989,6 +2224,11 @@
         record_chat: $("#cdChat").checked,
         disable_ads: $("#cdAds").checked,
         keep_original: $("#cdKeep").checked,
+        auto_scene_by_game: $("#cdAutoScene").checked,
+        separate_audio_track: $("#cdSepAudio").checked,
+        live_auto_clip: $("#cdAutoClip").checked,
+        auto_clip_threshold: Math.max(5, Number($("#cdClipThr").value) || 18),
+        chat_trigger_words: $("#cdTrigWords").value.trim(),
         segment_minutes: Number($("#cdSeg").value) || 0,
         category_filter: $("#cdCat").value.trim(),
         title_filter: $("#cdTitle").value.trim(),
@@ -2012,6 +2252,18 @@
   }
 
   // ==================== LIGHTBOX PLAYER & COMMAND PALETTE ====================
+  function openLiveStreamPlayer(ch) {
+    $("#playerTitle").textContent = `🔴 Прямой эфир (без рекламы) — ${ch.username} · ${ch.game || ch.platform.toUpperCase()}`;
+    const v = $("#lightboxVideo");
+    v.src = `/media/stream?url=${encodeURIComponent(ch.stream_url)}&q=${encodeURIComponent(ch.quality || "720p60")}&t=${Date.now()}`;
+    const row = $("#playerMarkersRow");
+    if (row) {
+      row.innerHTML = `<span style="color:var(--green);font-weight:600;">⚡ Прямой поток через Streamlink (без рекламы Twitch)</span>`
+        + `<span style="margin-left:auto;">Если поток буферизуется, подождите 2–3 сек</span>`;
+    }
+    $("#playerModal").classList.remove("hidden");
+  }
+
   function openLightboxPlayer(path, name, markers = []) {
     $("#playerTitle").textContent = name || path;
     const v = $("#lightboxVideo");
@@ -2204,6 +2456,9 @@
       } else {
         showToast("AI YouTube", data?.error || "Ошибка генерации", "error");
       }
+    } else if (type === "stream_digest") {
+      state.streamDigest = data?.text || "";
+      if (state.page === "studio") renderStudioPage();
     } else if (type === "catalog") {
       state.catalogLoading = false;
       state.catalogError = data.error || "";
@@ -2264,15 +2519,22 @@
     $("#btnOpenCmd").onclick = openCmdPalette;
     $("#cmdInput").oninput = (e) => renderCmdResults(e.target.value);
     $("#cmdModal").onclick = (e) => { if (e.target.id === "cmdModal") $("#cmdModal").classList.add("hidden"); };
-    $("#playerClose").onclick = () => { $("#lightboxVideo").pause(); $("#playerModal").classList.add("hidden"); };
-    $("#playerModal").onclick = (e) => { if (e.target.id === "playerModal") { $("#lightboxVideo").pause(); $("#playerModal").classList.add("hidden"); } };
+    const closeLightboxPlayer = () => {
+      const v = $("#lightboxVideo");
+      v.pause();
+      v.removeAttribute("src");
+      v.load();
+      $("#playerModal").classList.add("hidden");
+    };
+    $("#playerClose").onclick = closeLightboxPlayer;
+    $("#playerModal").onclick = (e) => { if (e.target.id === "playerModal") closeLightboxPlayer(); };
 
     window.addEventListener("keydown", (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openCmdPalette(); return; }
       if (e.key === "Escape") {
         $("#cmdModal").classList.add("hidden");
         $("#chDrawer").classList.add("hidden");
-        if (!$("#playerModal").classList.contains("hidden")) { $("#lightboxVideo").pause(); $("#playerModal").classList.add("hidden"); }
+        if (!$("#playerModal").classList.contains("hidden")) closeLightboxPlayer();
         return;
       }
       const inInput = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);

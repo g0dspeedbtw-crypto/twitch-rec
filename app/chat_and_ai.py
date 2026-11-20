@@ -96,12 +96,23 @@ class TwitchChatRecorder:
         chat_position: str = "right",
         chat_font_size: int = 28,
         chat_hide_bots: bool = True,
+        trigger_words: str = "",
+        on_keyword_cb: Optional[Callable[[float, str, str], None]] = None,
+        auto_clip_threshold: int = 0,
+        on_hype_spike_cb: Optional[Callable[[float, int], None]] = None,
     ):
         self.channel = channel.strip().lower()
         self.video_path = video_path
         self.chat_position = chat_position
         self.chat_font_size = chat_font_size
         self.chat_hide_bots = chat_hide_bots
+        self.trigger_words = [w.strip().lower() for w in (trigger_words or "").split(",") if w.strip()]
+        self.on_keyword_cb = on_keyword_cb
+        self.auto_clip_threshold = int(auto_clip_threshold or 0)
+        self.on_hype_spike_cb = on_hype_spike_cb
+        self._recent_hype_ts: List[float] = []
+        self._last_clip_trigger = -120.0
+        self._last_kw_trigger = -15.0
         self.json_path = str(Path(video_path).with_suffix(".chat.json"))
         self.ass_path = str(Path(video_path).with_suffix(".chat.ass"))
         self.messages: List[dict] = []
@@ -178,6 +189,33 @@ class TwitchChatRecorder:
             "color": color,
             "text": text,
         })
+        txt_low = text.lower()
+        # #10 Auto-marker on keyword mention in chat
+        if self.trigger_words and self.on_keyword_cb and (t_sec - self._last_kw_trigger >= 10.0):
+            for kw in self.trigger_words:
+                if kw in txt_low:
+                    self._last_kw_trigger = t_sec
+                    try:
+                        self.on_keyword_cb(t_sec, kw, f"{display}: {text[:50]}")
+                    except Exception:
+                        pass
+                    break
+
+        # #7 Live Auto-Clipper on chat hype spike
+        if self.auto_clip_threshold > 0 and self.on_hype_spike_cb:
+            weight = 2 if any(hk in txt_low for hk in HYPE_KEYWORDS) else 1
+            for _ in range(weight):
+                self._recent_hype_ts.append(t_sec)
+            cutoff = t_sec - 10.0
+            self._recent_hype_ts = [x for x in self._recent_hype_ts if x >= cutoff]
+            if len(self._recent_hype_ts) >= self.auto_clip_threshold and (t_sec - self._last_clip_trigger >= 60.0):
+                self._last_clip_trigger = t_sec
+                score = len(self._recent_hype_ts)
+                self._recent_hype_ts.clear()
+                try:
+                    self.on_hype_spike_cb(t_sec, score)
+                except Exception:
+                    pass
 
     def _flush_files(self) -> None:
         if not self.messages:
@@ -523,6 +561,87 @@ def detect_loud_moments(
         return [], []
 
 
+# ------------------------------------------------------------------ #17 AI Laughter / Scream / Gunshot Audio Event Detector
+def detect_audio_events(
+    video_path: str,
+    top_n: int = 12,
+    bucket_sec: int = 4,
+) -> Tuple[List[Tuple[float, float]], List[HighlightMoment]]:
+    """
+    Detect high-frequency vocal/action audio events (streamer laughter, screams, gunshots)
+    by bandpass-filtering 900Hz–3800Hz energy + crest-factor bursts via FFmpeg astats.
+    """
+    ffmpeg = get_ffmpeg_path()
+    if not ffmpeg or not os.path.exists(video_path):
+        return [], []
+    try:
+        res = subprocess.run(
+            [
+                ffmpeg, "-hide_banner", "-i", video_path,
+                "-af", (
+                    "highpass=f=900,lowpass=f=3800,asetnsamples=24000,"
+                    "astats=metadata=1:reset=1,"
+                    "ametadata=print:key=lavfi.astats.Overall.Peak_level"
+                ),
+                "-vn", "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=240, creationflags=CREATE_NO_WINDOW,
+        )
+        peaks: List[Tuple[float, float]] = []
+        cur_t = 0.0
+        for line in (res.stderr or "").splitlines():
+            mt = re.search(r"pts_time:([\d.]+)", line)
+            if mt:
+                cur_t = float(mt.group(1))
+            mv = re.search(r"Peak_level=(-?[\d.]+)", line)
+            if mv:
+                db = float(mv.group(1))
+                val = max(0.0, 55.0 + db)
+                peaks.append((cur_t, val))
+
+        if not peaks:
+            return detect_loud_moments(video_path, top_n=top_n, bucket_sec=bucket_sec)
+
+        max_t = peaks[-1][0]
+        nb = max(1, int(max_t // bucket_sec) + 1)
+        b_vals = [0.0] * nb
+        b_counts = [0] * nb
+        for t, val in peaks:
+            bi = min(nb - 1, int(t // bucket_sec))
+            if val > b_vals[bi]:
+                b_vals[bi] = val
+            if val > 38.0:
+                b_counts[bi] += 1
+
+        heatmap = [(i * bucket_sec, round(b_vals[i], 1)) for i in range(nb)]
+        ranked = sorted(range(nb), key=lambda i: b_vals[i] + b_counts[i] * 2.5, reverse=True)
+        highlights: List[HighlightMoment] = []
+        used: List[float] = []
+        for idx in ranked:
+            if len(highlights) >= top_n:
+                break
+            if b_vals[idx] < 24.0 and len(highlights) >= 3:
+                break
+            t = idx * bucket_sec
+            if any(abs(t - ut) < 12.0 for ut in used):
+                continue
+            used.append(t)
+            kind = "Смех / Эмоции" if b_counts[idx] >= 3 else "Крик / Выстрел"
+            db_est = b_vals[idx] - 55.0
+            highlights.append(
+                HighlightMoment(
+                    timestamp_sec=float(t),
+                    score=round(b_vals[idx], 1),
+                    source="events",
+                    reason=f"AI Аудио: {kind} ({db_est:.1f} дБ)",
+                )
+            )
+        highlights.sort(key=lambda h: h.timestamp_sec)
+        return heatmap, highlights
+    except Exception:
+        return [], []
+
+
 # ------------------------------------------------------------------ #19 Live Markers & EDL Export
 def save_markers_and_edl(video_path: str, markers: List[dict]) -> Tuple[str, str]:
     """Save manual highlight markers to .markers.json and Premiere/DaVinci .edl."""
@@ -569,6 +688,7 @@ class WhisperAIWorker(QThread):
         encoder: str = "h264_nvenc",
         quality: int = 23,
         initial_prompt: str = "",
+        task: str = "transcribe",  # "transcribe" | "translate" (RU -> EN)
         parent=None,
     ):
         super().__init__(parent)
@@ -584,6 +704,7 @@ class WhisperAIWorker(QThread):
         self.encoder = encoder
         self.quality = quality
         self.initial_prompt = (initial_prompt or "").strip()
+        self.task = task if task in ("transcribe", "translate") else "transcribe"
         self._stop_requested = False
         self._proc: Optional[subprocess.Popen] = None
 
@@ -649,6 +770,7 @@ class WhisperAIWorker(QThread):
             segments_gen, _ = model.transcribe(
                 self.video_path,
                 language=self.language if self.language != "auto" else None,
+                task=self.task,
                 initial_prompt=self.initial_prompt or None,
                 word_timestamps=True,
                 vad_filter=True,
@@ -987,6 +1109,138 @@ def generate_youtube_metadata(
             "description": parsed.get("description") or content,
             "tags": parsed.get("tags") or f"{channel_name}, {game_name}, twitch",
             "chapters": parsed.get("chapters") or "\n".join(chapters),
+            "summary": parsed.get("summary") or f"Конспект эфира {channel_name} ({game_name}):\n" + "\n".join(chapters),
         }
     except Exception as exc:
         return False, {"error": f"Ошибка LLM API: {exc}"}
+
+
+def generate_stream_digest(
+    video_path: str,
+    llm_api_url: str = "",
+    llm_api_key: str = "",
+    llm_model: str = "gpt-4o-mini",
+    proxy_url: str = "",
+) -> Tuple[bool, str]:
+    """
+    #18 Generate a structured Stream Digest / Summary (topics, highlights, chat stats, key moments)
+    from companion .meta.json, .markers.json, .chat.json, and .srt files.
+    """
+    p = Path(video_path)
+    meta_info = {}
+    if p.with_suffix(".meta.json").exists():
+        try:
+            meta_info = json.loads(p.with_suffix(".meta.json").read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    markers = []
+    if p.with_suffix(".markers.json").exists():
+        try:
+            markers = json.loads(p.with_suffix(".markers.json").read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    chat_msgs = []
+    if p.with_suffix(".chat.json").exists():
+        try:
+            raw_c = json.loads(p.with_suffix(".chat.json").read_text(encoding="utf-8"))
+            chat_msgs = raw_c if isinstance(raw_c, list) else raw_c.get("messages", [])
+        except Exception:
+            pass
+
+    srt_txt = ""
+    if p.with_suffix(".srt").exists():
+        try:
+            srt_txt = p.with_suffix(".srt").read_text(encoding="utf-8")[:5000]
+        except Exception:
+            pass
+
+    _, chat_hl = analyze_chat_highlights(str(p.with_suffix(".chat.json")), top_n=12) if p.with_suffix(".chat.json").exists() else ([], [])
+
+    def _mmss(sec: float) -> str:
+        s = max(0, int(sec))
+        h, rem = divmod(s, 3600)
+        m, sc = divmod(rem, 60)
+        return f"{h:02d}:{m:02d}:{sc:02d}" if h > 0 else f"{m:02d}:{sc:02d}"
+
+    ch_name = meta_info.get("channel") or p.parent.name
+    game = meta_info.get("game") or "Прямой эфир"
+    title = meta_info.get("title") or p.stem
+    dur_s = float(meta_info.get("duration_sec") or probe_video(video_path).get("duration", 0))
+
+    lines = [
+        f"📋 КОНСПЕКТ СТРИМА: {ch_name}",
+        f"🎮 Категория: {game}",
+        f"📌 Название: {title}",
+        f"⏱ Длительность: {_mmss(dur_s)} · Сообщений чата: {len(chat_msgs)} · Маркеров: {len(markers)}",
+        "",
+        "🔥 ГЛАВНЫЕ МОМЕНТЫ И ТАЙМКОДЫ:",
+        "  • 00:00 — Начало трансляции",
+    ]
+    for mk in markers[:20]:
+        lines.append(f"  • {_mmss(mk.get('t', 0))} — [Маркер] {mk.get('note', 'Момент')}")
+    for hl in chat_hl[:12]:
+        lines.append(f"  • {_mmss(hl.timestamp_sec)} — {hl.reason}")
+
+    if chat_msgs:
+        user_cnt: Dict[str, int] = {}
+        for m in chat_msgs:
+            u = str(m.get("user") or "")
+            if u and u.lower() not in CHAT_BOT_ACCOUNTS:
+                user_cnt[u] = user_cnt.get(u, 0) + 1
+        top_users = sorted(user_cnt.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        if top_users:
+            lines.append("")
+            lines.append("💬 Топ-активных зрителей чата: " + ", ".join(f"{u} ({c})" for u, c in top_users))
+
+    if srt_txt.strip():
+        clean_speech = [
+            ln.strip() for ln in srt_txt.splitlines()
+            if ln.strip() and not ln.strip().isdigit() and "-->" not in ln
+        ]
+        excerpt = " ".join(clean_speech[:35])[:700]
+        if excerpt:
+            lines.append("")
+            lines.append(f"🎙 Выдержка из речи (Whisper): «{excerpt}...»")
+
+    local_digest = "\n".join(lines)
+
+    if llm_api_url.strip():
+        try:
+            endpoint = llm_api_url.strip().rstrip("/")
+            if not endpoint.endswith("/chat/completions"):
+                endpoint = f"{endpoint}/chat/completions"
+            headers = {"Content-Type": "application/json"}
+            if llm_api_key.strip():
+                headers["Authorization"] = f"Bearer {llm_api_key.strip()}"
+            proxies = {"http": proxy_url.strip(), "https": proxy_url.strip()} if proxy_url.strip() else None
+            resp = requests.post(
+                endpoint,
+                json={
+                    "model": llm_model.strip() or "gpt-4o-mini",
+                    "messages": [{
+                        "role": "user",
+                        "content": (
+                            f"Сделай подробный и структурированный конспект (саммари) стрима на русском языке "
+                            f"для монтажёра и зрителей по этим данным:\n\n{local_digest}"
+                        ),
+                    }],
+                    "temperature": 0.5,
+                },
+                headers=headers,
+                timeout=35,
+                proxies=proxies,
+            )
+            resp.raise_for_status()
+            llm_txt = (((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content")) or ""
+            if llm_txt.strip():
+                local_digest = llm_txt.strip() + "\n\n---\n" + local_digest
+        except Exception:
+            pass
+
+    try:
+        p.with_suffix(".digest.txt").write_text(local_digest, encoding="utf-8")
+    except Exception:
+        pass
+    return True, local_digest

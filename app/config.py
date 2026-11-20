@@ -42,7 +42,7 @@ def get_data_dir() -> Path:
 
 BASE_DIR = get_resource_dir()
 DATA_DIR = get_data_dir()
-APP_VERSION = "2.2.3"
+APP_VERSION = "2.3.0"
 DEFAULT_GITHUB_REPO = "g0dspeedbtw-crypto/twitch-rec"
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -107,15 +107,19 @@ class BlurRegion:
     y: float
     w: float
     h: float
-    mode: str = "blur"                 # "blur" | "pixelate" | "solid" | "image"
+    mode: str = "blur"                 # "blur" | "pixelate" | "solid" | "image" | "video"
     strength: int = 25                 # sigma (blur) or block factor (pixelate)
     feather: int = 0                   # soft edge feather pixels (0..40)
-    image_path: str = ""               # custom PNG/JPG logo overlay when mode == "image"
+    image_path: str = ""               # custom PNG/JPG/GIF/MP4/WEBM overlay when mode in ("image", "video")
     start_sec: Optional[float] = None  # timed blur interval start (sec)
     end_sec: Optional[float] = None    # timed blur interval end (sec)
     auto_detect: bool = False          # OpenCV template detection for dynamic banners
     template_path: str = ""            # saved template crop PNG for auto_detect
     detect_threshold: float = 0.72     # template matching confidence 0.4..0.95
+    track_motion: bool = False         # OpenCV dynamic motion tracking for moving banners
+    chromakey: bool = False            # remove green/custom background color on video/image overlays
+    chromakey_color: str = "0x00FF00"  # hex color for chromakey
+    chromakey_similarity: float = 0.25 # 0.05..0.70
     label: str = "Баннер"
 
     def clamped(self) -> "BlurRegion":
@@ -125,7 +129,7 @@ class BlurRegion:
         h = max(0.01, min(1.0 - y, float(self.h)))
         strength = max(2, min(80, int(self.strength)))
         feather = max(0, min(50, int(self.feather)))
-        mode = self.mode if self.mode in ("blur", "pixelate", "solid", "image") else "blur"
+        mode = self.mode if self.mode in ("blur", "pixelate", "solid", "image", "video") else "blur"
         s_sec = float(self.start_sec) if self.start_sec is not None else None
         e_sec = float(self.end_sec) if self.end_sec is not None else None
         if s_sec is not None and s_sec < 0:
@@ -133,6 +137,10 @@ class BlurRegion:
         if e_sec is not None and s_sec is not None and e_sec <= s_sec:
             e_sec = None
         thr = max(0.35, min(0.98, float(self.detect_threshold)))
+        ck_sim = max(0.05, min(0.70, float(self.chromakey_similarity or 0.25)))
+        ck_col = str(self.chromakey_color or "0x00FF00").strip()
+        if ck_col.startswith("#"):
+            ck_col = "0x" + ck_col[1:]
         return BlurRegion(
             x=x,
             y=y,
@@ -147,6 +155,10 @@ class BlurRegion:
             auto_detect=bool(self.auto_detect),
             template_path=str(self.template_path or ""),
             detect_threshold=thr,
+            track_motion=bool(self.track_motion),
+            chromakey=bool(self.chromakey),
+            chromakey_color=ck_col,
+            chromakey_similarity=ck_sim,
             label=str(self.label or "Баннер"),
         )
 
@@ -174,6 +186,12 @@ class ChannelConfig:
     schedule_start: str = "00:00"
     schedule_end: str = "23:59"
     schedule_days: List[int] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])  # Mon=0..Sun=6
+    # v2.3.0 Advanced Live Features
+    auto_scene_by_game: bool = True     # auto-switch blur preset when game/category name matches scene name
+    live_auto_clip: bool = False        # auto-cut 45s clip on chat hype spike during live recording
+    auto_clip_threshold: int = 18       # hype messages per 10s bucket to trigger auto-clip
+    chat_trigger_words: str = ""        # comma-separated keywords in chat that auto-drop a highlight marker
+    separate_audio_track: bool = False  # automatically extract a clean .mp3/.wav audio track alongside video
 
     @property
     def blur_regions(self) -> List[BlurRegion]:
@@ -341,6 +359,13 @@ class AppConfig:
     # Cloud Auto-Updates (GitHub Releases)
     github_repo: str = DEFAULT_GITHUB_REPO
     auto_check_updates: bool = True
+    # v2.3.0 Smart Segment Blur, Native OS Alerts, Auto-Publish & Cloud Config Sync
+    smart_segment_blur: bool = True     # re-encode ONLY intervals with active banner, lossless copy the rest
+    native_os_notifications: bool = True
+    auto_publish_telegram: bool = False # auto-upload finished Shorts/exports (<49MB) to Telegram
+    cloud_sync_path: str = ""           # optional iCloud/Dropbox/OneDrive folder or file path for auto profile sync
+    cloud_gist_token: str = ""          # optional GitHub token for 1-click Cloud Profile Sync (Gist)
+    cloud_gist_id: str = ""             # saved GitHub Gist ID for profile sync
     # Channels
     channels: List[ChannelConfig] = field(default_factory=list)
 
@@ -406,6 +431,10 @@ class AppConfig:
             auto_detect=bool(r.get("auto_detect", False)),
             template_path=r.get("template_path", ""),
             detect_threshold=float(r.get("detect_threshold", 0.72)),
+            track_motion=bool(r.get("track_motion", False)),
+            chromakey=bool(r.get("chromakey", False)),
+            chromakey_color=str(r.get("chromakey_color", "0x00FF00")),
+            chromakey_similarity=float(r.get("chromakey_similarity", 0.25)),
             label=r.get("label", "Баннер"),
         ).clamped()
 
@@ -463,6 +492,11 @@ class AppConfig:
                     schedule_start=str(ch_raw.get("schedule_start", "00:00")),
                     schedule_end=str(ch_raw.get("schedule_end", "23:59")),
                     schedule_days=list(ch_raw.get("schedule_days", [0, 1, 2, 3, 4, 5, 6])),
+                    auto_scene_by_game=bool(ch_raw.get("auto_scene_by_game", True)),
+                    live_auto_clip=bool(ch_raw.get("live_auto_clip", False)),
+                    auto_clip_threshold=max(5, int(ch_raw.get("auto_clip_threshold", 18))),
+                    chat_trigger_words=str(ch_raw.get("chat_trigger_words", "")),
+                    separate_audio_track=bool(ch_raw.get("separate_audio_track", False)),
                 )
             )
 
@@ -521,6 +555,12 @@ class AppConfig:
             compact_cards=bool(raw.get("compact_cards", False)),
             github_repo=normalize_github_repo(str(raw.get("github_repo") or DEFAULT_GITHUB_REPO)),
             auto_check_updates=bool(raw.get("auto_check_updates", True)),
+            smart_segment_blur=bool(raw.get("smart_segment_blur", True)),
+            native_os_notifications=bool(raw.get("native_os_notifications", True)),
+            auto_publish_telegram=bool(raw.get("auto_publish_telegram", False)),
+            cloud_sync_path=str(raw.get("cloud_sync_path", "")),
+            cloud_gist_token=str(raw.get("cloud_gist_token", "")),
+            cloud_gist_id=str(raw.get("cloud_gist_id", "")),
             channels=channels,
         )
         cfg.ensure_output_dir()
