@@ -1624,7 +1624,7 @@ class AppBridge(QObject):
             "max_concurrent_blurs", "night_render_enabled", "night_render_start",
             "night_render_end", "normalize_audio_default", "low_priority_render",
             "game_mode_enabled", "game_processes", "whisper_model", "whisper_prompt", "banned_words",
-            "llm_api_url", "llm_api_key", "llm_model",
+            "llm_api_url", "llm_api_key", "llm_model", "ai_brand_voice",
             "chat_position", "chat_font_size", "chat_hide_bots", "watermark_path",
             "theme", "compact_cards", "github_repo", "auto_check_updates",
             "smart_segment_blur", "native_os_notifications", "auto_publish_telegram",
@@ -1749,6 +1749,110 @@ class AppBridge(QObject):
             return json.dumps({"ok": True, "path": out})
         self._toast("Ошибка захвата кадра", err or "Не удалось", "error")
         return json.dumps({"ok": False, "error": err})
+
+    @Slot(str, str)
+    def runAiSuiteTask(self, task_type: str, payload_json: str) -> None:
+        """Async dispatcher for all 25 AI Suite analysis & generation features."""
+        try:
+            payload = json.loads(payload_json or "{}")
+        except Exception:
+            payload = {}
+
+        cfg_copy = deepcopy(self.config)
+        bridge = self
+
+        class _AISuiteWorker(QThread):
+            done = Signal(str, object)
+
+            def run(self) -> None:
+                from app import ai_suite
+                res: dict = {"ok": False}
+                try:
+                    vp = str(payload.get("video_path") or "")
+                    if task_type == "viral_clips":
+                        clips = ai_suite.find_viral_clips(vp, str(payload.get("chat_path") or ""), cfg_copy)
+                        res = {"ok": True, "clips": clips}
+                    elif task_type == "face_track":
+                        ok, reg, msg = ai_suite.detect_face_crop_region(vp)
+                        res = {"ok": ok, "region": reg, "message": msg}
+                    elif task_type == "speech_search":
+                        hits = ai_suite.search_library_speech(cfg_copy.output_dir, str(payload.get("query") or ""))
+                        res = {"ok": True, "query": payload.get("query", ""), "hits": hits}
+                    elif task_type == "privacy_blur":
+                        ok, regs, msg = ai_suite.detect_privacy_regions(vp)
+                        res = {"ok": ok, "regions": regs, "message": msg}
+                    elif task_type == "chapters":
+                        txt = ai_suite.generate_ai_chapters(vp, cfg_copy)
+                        res = {"ok": True, "text": txt}
+                    elif task_type == "copilot":
+                        res = {"ok": True, **ai_suite.run_ai_copilot(str(payload.get("prompt") or ""), vp, cfg_copy)}
+                    elif task_type == "vision_thumb":
+                        res = {"ok": True, **ai_suite.analyze_frame_for_thumbnail(vp, float(payload.get("ts") or 15), cfg_copy)}
+                    elif task_type == "ban_shield":
+                        ok, hits, msg = ai_suite.scan_ban_words(
+                            vp,
+                            str(payload.get("banned_words") or cfg_copy.banned_words),
+                            str(payload.get("model") or cfg_copy.whisper_model or "small"),
+                            str(payload.get("language") or "ru"),
+                        )
+                        res = {"ok": ok, "hits": hits, "message": msg}
+                    elif task_type == "quote_card":
+                        ok, out = ai_suite.generate_quote_card(
+                            vp,
+                            float(payload.get("ts") or 15),
+                            str(payload.get("quote") or ""),
+                            str(payload.get("author") or ""),
+                            str(payload.get("accent") or "#8b5cf6"),
+                        )
+                        res = {"ok": ok, "path": out if ok else "", "error": "" if ok else out}
+                    elif task_type == "game_events":
+                        evs = ai_suite.detect_game_events_vision(vp)
+                        res = {"ok": True, "events": evs}
+                    elif task_type == "best_frames":
+                        frames = ai_suite.pick_best_thumbnail_frames(vp, count=5)
+                        res = {"ok": True, "frames": frames}
+                    elif task_type == "social_post":
+                        txt = ai_suite.generate_social_post(vp, str(payload.get("platform") or "telegram"), cfg_copy)
+                        res = {"ok": True, "platform": payload.get("platform", "telegram"), "text": txt}
+                    elif task_type == "virality_critique":
+                        res = {"ok": True, **ai_suite.analyze_virality_critique(vp, str(payload.get("title") or ""), cfg_copy)}
+                    elif task_type == "chat_sentiment":
+                        cp = str(payload.get("chat_path") or "")
+                        if not cp and vp:
+                            cp = str(Path(vp).with_suffix(".chat.json"))
+                        res = ai_suite.analyze_chat_sentiment(cp)
+                except Exception as exc:
+                    res = {"ok": False, "error": str(exc)}
+                self.done.emit(task_type, res)
+
+        w = _AISuiteWorker(self)
+
+        def _on_done(t_type: str, data: object) -> None:
+            d = data if isinstance(data, dict) else {}
+            if t_type == "best_frames":
+                for f in d.get("frames") or []:
+                    if f.get("path"):
+                        bridge._register_allowed_media_file(f["path"])
+            elif t_type == "quote_card" and d.get("ok") and d.get("path"):
+                bridge._register_allowed_media_file(d["path"])
+                bridge._toast("Карточка-цитата готова", Path(d["path"]).name, "success")
+            elif t_type == "face_track":
+                bridge._toast("AI Face Tracking", d.get("message") or ("Лицо найдено!" if d.get("ok") else "Не найдено"), "success" if d.get("ok") else "info")
+            elif t_type == "privacy_blur":
+                bridge._toast("AI Приватность", d.get("message") or "", "success" if d.get("ok") else "info")
+            elif t_type == "ban_shield":
+                bridge._toast("AI Ban-Word Shield", d.get("message") or "", "success" if d.get("ok") else "error")
+            elif t_type == "viral_clips":
+                bridge._toast("AI Вирусные клипы", f"Найдено {len(d.get('clips') or [])} лучших моментов", "success")
+            elif t_type == "game_events":
+                bridge._toast("AI Vision (Игровые события)", f"Найдено {len(d.get('events') or [])} событий", "success")
+            bridge._emit("ai_suite_result", {"task": t_type, "data": d})
+            if w in bridge._aux_workers:
+                bridge._aux_workers.remove(w)
+
+        w.done.connect(_on_done)
+        self._aux_workers.append(w)
+        w.start()
 
     # ------------------------------------------------------------------ #41 Interactive Telegram Bot
     def _sync_telegram_bot(self) -> None:

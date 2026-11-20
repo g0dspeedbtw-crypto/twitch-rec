@@ -38,6 +38,19 @@
     studioSpeed: 1,
     studioFx: { speed: 1, color_preset: "none", brightness: 0, contrast: 1, saturation: 1, sharpen: false, fade_in: 0, fade_out: 0, volume_db: 0, denoise: false, voice_enhance: false, normalize_audio: false },
     studioThumb: { headline: "ЛУЧШИЙ МОМЕНТ СТРИМА", subtitle: "TWITCH HIGHLIGHTS", accent: "#8b5cf6" },
+    aiHubSub: "viral",
+    aiViralClips: [],
+    aiChapters: "",
+    aiSocialPost: "",
+    aiCritique: null,
+    aiCopilot: null,
+    aiBanHits: [],
+    aiBestFrames: [],
+    aiThumbIdeas: [],
+    aiQuotePath: "",
+    aiChatSentiment: null,
+    speechSearchQuery: "",
+    speechSearchHits: [],
     shortsCam: null,
     shortsGame: null,
     libSearch: "",
@@ -670,7 +683,7 @@
 
       <div id="libStatsWrap"></div>
 
-      <div class="card add-bar" style="margin-bottom:18px;">
+      <div class="card add-bar" style="margin-bottom:12px;">
         <input class="input" id="libSearch" placeholder="Поиск по каналу или имени файла..." value="${esc(state.libSearch)}" />
         <select class="input-select" id="libFilter" style="width:200px;">
           <option value="all" ${state.libFilter === "all" ? "selected" : ""}>Все видео</option>
@@ -680,6 +693,12 @@
         </select>
       </div>
 
+      <div class="card add-bar" style="margin-bottom:16px;padding:10px 14px;">
+        <input class="input" id="libSpeechInp" placeholder="🔍 AI Поиск по речи и чату внутри всех записей (напр. «клатч», «подарил», «смешно»)..." value="${esc(state.speechSearchQuery)}" />
+        <button class="btn btn-soft btn-sm" id="btnLibSpeechSearch">${iconSvg("sparkles", 14)}<span>Найти момент</span></button>
+      </div>
+      <div id="libSpeechResults"></div>
+
       <div id="libGridWrap"></div>
     `;
 
@@ -687,8 +706,53 @@
     $("#btnLibFolder").onclick = () => callBackend("openInExplorer", "");
     $("#libSearch").oninput = (e) => { state.libSearch = e.target.value; renderLibraryGrid(); };
     $("#libFilter").onchange = (e) => { state.libFilter = e.target.value; renderLibraryGrid(); };
+    const doSpeechSearch = () => {
+      const q = $("#libSpeechInp").value.trim();
+      state.speechSearchQuery = q;
+      if (!q) { state.speechSearchHits = []; renderLibrarySpeechHits(); return; }
+      callBackend("runAiSuiteTask", "speech_search", JSON.stringify({ query: q }));
+      showToast("AI Поиск по речи", `Ищем «${q}» по всем записям...`, "info");
+    };
+    $("#btnLibSpeechSearch").onclick = doSpeechSearch;
+    $("#libSpeechInp").onkeydown = (e) => { if (e.key === "Enter") doSpeechSearch(); };
 
+    renderLibrarySpeechHits();
     renderLibraryGrid();
+  }
+
+  function renderLibrarySpeechHits() {
+    const box = $("#libSpeechResults");
+    if (!box) return;
+    if (!state.speechSearchHits.length) { box.innerHTML = ""; return; }
+    box.innerHTML = `
+      <div class="card" style="margin-bottom:16px;padding:12px 14px;">
+        <div class="input-row" style="justify-content:space-between;margin-bottom:8px;">
+          <strong style="font-size:13px;">🔍 Найдено совпадений по «${esc(state.speechSearchQuery)}»: ${state.speechSearchHits.length}</strong>
+          <button class="btn btn-subtle btn-sm" id="btnClearSpHits">Скрыть</button>
+        </div>
+        <div class="hl-list" style="max-height:190px;">
+          ${state.speechSearchHits.map((h) => `
+            <div class="hl-row">
+              <span class="mono" style="color:var(--accent-light);font-weight:700;">${fmtDur(h.ts)}</span>
+              <span style="font-size:11.5px;color:var(--text-muted);">${esc(h.source)}</span>
+              <span style="flex:1;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(h.text)}"><strong>${esc(h.name)}:</strong> ${esc(h.text)}</span>
+              <button class="btn btn-soft btn-sm act-jump-sp" data-path="${esc(h.video_path)}" data-ts="${h.ts}">Открыть</button>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `;
+    $("#btnClearSpHits").onclick = () => { state.speechSearchHits = []; renderLibrarySpeechHits(); };
+    box.querySelectorAll(".act-jump-sp").forEach((b) => {
+      b.onclick = () => {
+        state.studioFile = b.dataset.path;
+        switchPage("studio");
+        setTimeout(() => {
+          const mon = $("#studioMonitor");
+          if (mon) mon.currentTime = Number(b.dataset.ts) || 0;
+        }, 400);
+      };
+    });
   }
 
   // ==================== PAGE 4: BLUR & GPU QUEUE ====================
@@ -1223,15 +1287,17 @@
     if (state.studioSub === "trim") {
       host.innerHTML = `
         <div class="studio-inspector-card">
-          <div class="inspector-group-title"><span>Обрезка отрезка</span></div>
+          <div class="inspector-group-title"><span>Обрезка и AI-чистка</span></div>
           <div class="form-grid-2">
             <div class="field"><label>Начало (I)</label><input class="input mono" id="trimStart" value="${fmtDur(state.studioIn)}" /></div>
             <div class="field"><label>Конец (O)</label><input class="input mono" id="trimEnd" value="${fmtDur(state.studioOut)}" /></div>
           </div>
           <label class="switch-inline"><input type="checkbox" id="trimAcc" checked/><span class="switch-track"></span><span style="font-size:12.5px;">Точный кадр (перекодирование)</span></label>
-          <div class="input-row">
-            <button class="btn btn-primary btn-full" id="btnDoTrim">${iconSvg("scissors", 14)}<span>Вырезать отрезок</span></button>
-            <button class="btn btn-soft" id="btnRemoveAfk" title="Удалить тишину и статичные экраны AFK">${iconSvg("sparkles", 14)}<span>Анти-AFK</span></button>
+          <button class="btn btn-primary btn-full" id="btnDoTrim">${iconSvg("scissors", 14)}<span>Вырезать отрезок</span></button>
+          <div class="form-grid-3" style="gap:6px;">
+            <button class="btn btn-soft btn-sm" id="btnRemoveAfk" title="Удалить тишину и AFK">⚡ Анти-AFK</button>
+            <button class="btn btn-soft btn-sm" id="btnRemoveFillers" title="AI удаление слов-паразитов и пауз (Descript)">🧹 Паразиты</button>
+            <button class="btn btn-subtle btn-sm" id="btnSmartSceneCut" title="AI вырезка экранов «Скоро начнём» / BRB">✂ BRB/Загр.</button>
           </div>
         </div>
 
@@ -1249,7 +1315,6 @@
 
         <div class="studio-inspector-card">
           <div class="inspector-group-title"><span>Разбить видео на равные части</span></div>
-          <div style="font-size:12px;color:var(--text-muted);">Мгновенно без перекодирования нарежет стрим на файлы по 30 мин, 1 часу и т.д.</div>
           <div class="split-pills">
             <button class="split-pill st-split-preset" data-min="15">15 мин</button>
             <button class="split-pill st-split-preset active" data-min="30">30 мин</button>
@@ -1257,8 +1322,8 @@
             <button class="split-pill st-split-preset" data-min="120">2 часа</button>
           </div>
           <div class="input-row">
-            <input type="number" class="input mono" id="stSplitMin" value="30" min="1" max="600" style="width:90px;" />
-            <span style="font-size:12px;color:var(--text-muted);">минут</span>
+            <input type="number" class="input mono" id="stSplitMin" value="30" min="1" max="600" style="width:84px;" />
+            <span style="font-size:12px;color:var(--text-muted);">мин</span>
             <div style="flex:1"></div>
             <button class="btn btn-primary btn-sm" id="btnSplitParts">${iconSvg("scissors", 14)}<span>Разбить</span></button>
           </div>
@@ -1266,7 +1331,7 @@
 
         <div class="studio-inspector-card">
           <div class="inspector-group-title"><span>Склейка файлов</span></div>
-          <label class="switch-inline"><input type="checkbox" id="catNorm"/><span class="switch-track"></span><span style="font-size:12.5px;">Выровнять разные видео в 1080p60</span></label>
+          <label class="switch-inline"><input type="checkbox" id="catNorm"/><span class="switch-track"></span><span style="font-size:12.5px;">Выровнять в 1080p60</span></label>
           <button class="btn btn-subtle btn-full" id="btnDoConcat">${iconSvg("plus", 14)}<span>Выбрать 2+ файлов и склеить</span></button>
         </div>
       `;
@@ -1274,22 +1339,20 @@
       $("#trimEnd").onchange = (e) => { const v = parseSec(e.target.value); if (v != null) { state.studioOut = v; renderStudioTimelineUI(); } };
       $("#btnDoTrim").onclick = () => $("#tlBtnQuickTrim")?.click();
       $("#btnRemoveAfk").onclick = () => {
-        const out = appendFileSuffix(state.studioFile, "_no_afk");
-        callBackend("runStudioAction", JSON.stringify({
-          action: "remove_silence_afk", title: "Удаление тишины и AFK", subtitle: fname,
-          params: { input_path: state.studioFile, output_path: out }
-        }));
+        callBackend("runStudioAction", JSON.stringify({ action: "remove_silence_afk", title: "Удаление тишины и AFK", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_no_afk") } }));
+      };
+      $("#btnRemoveFillers").onclick = () => {
+        callBackend("runStudioAction", JSON.stringify({ action: "remove_fillers", title: "AI Удаление слов-паразитов", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_clean_speech"), model: state.config.whisper_model || "small", language: "ru" } }));
+      };
+      $("#btnSmartSceneCut").onclick = () => {
+        callBackend("runStudioAction", JSON.stringify({ action: "smart_scene_cut", title: "AI Вырезка BRB / Загрузок", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_no_brb") } }));
       };
       host.querySelectorAll("[data-rm-seg]").forEach((b) => {
         b.onclick = () => { state.multiCutSegments.splice(Number(b.dataset.rmSeg), 1); renderStudioInspector(); renderStudioTimelineUI(); };
       });
       $("#btnClearMultiCut")?.addEventListener("click", () => { state.multiCutSegments = []; renderStudioInspector(); renderStudioTimelineUI(); });
       $("#btnRunMultiCut")?.addEventListener("click", () => {
-        const out = appendFileSuffix(state.studioFile, `_montage_${state.multiCutSegments.length}cuts`, ".mp4");
-        callBackend("runStudioAction", JSON.stringify({
-          action: "multi_cut", title: `Нарезка (${state.multiCutSegments.length} отрезков)`, subtitle: fname,
-          params: { input_path: state.studioFile, output_path: out, segments: state.multiCutSegments, accurate: $("#trimAcc")?.checked ?? true }
-        }));
+        callBackend("runStudioAction", JSON.stringify({ action: "multi_cut", title: `Нарезка (${state.multiCutSegments.length})`, subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, `_montage_${state.multiCutSegments.length}cuts`, ".mp4"), segments: state.multiCutSegments, accurate: $("#trimAcc")?.checked ?? true } }));
       });
       host.querySelectorAll(".st-split-preset").forEach((b) => {
         b.onclick = () => {
@@ -1300,27 +1363,17 @@
       });
       $("#btnSplitParts").onclick = () => {
         const mins = Math.max(1, Number($("#stSplitMin").value) || 30);
-        callBackend("runStudioAction", JSON.stringify({
-          action: "split_parts",
-          title: `Разбивка по ${mins >= 60 && mins % 60 === 0 ? `${mins / 60} ч` : `${mins} мин`}`,
-          subtitle: fname,
-          params: { input_path: state.studioFile, segment_minutes: mins }
-        }));
+        callBackend("runStudioAction", JSON.stringify({ action: "split_parts", title: `Разбивка по ${mins} мин`, subtitle: fname, params: { input_path: state.studioFile, segment_minutes: mins } }));
       };
       $("#btnDoConcat").onclick = async () => {
-        const raw = await callBackend("pickVideoFiles");
-        const files = JSON.parse(raw || "[]");
+        const files = JSON.parse((await callBackend("pickVideoFiles")) || "[]");
         if (files.length < 2) return;
-        const out = appendFileSuffix(files[0], "_merged", ".mp4");
-        callBackend("runStudioAction", JSON.stringify({
-          action: "concat", title: `Склейка (${files.length} файлов)`, subtitle: out.split(/[\\/]/).pop(),
-          params: { input_paths: files, output_path: out, normalize: $("#catNorm").checked }
-        }));
+        callBackend("runStudioAction", JSON.stringify({ action: "concat", title: `Склейка (${files.length})`, subtitle: files[0].split(/[\\/]/).pop(), params: { input_paths: files, output_path: appendFileSuffix(files[0], "_merged", ".mp4"), normalize: $("#catNorm").checked } }));
       };
     } else if (state.studioSub === "shorts") {
       host.innerHTML = `
         <div class="studio-inspector-card">
-          <div class="inspector-group-title"><span>Вертикальный Shorts / TikTok 9:16</span></div>
+          <div class="inspector-group-title"><span>Shorts / TikTok 9:16 + AI</span></div>
           <div class="field">
             <label>Шаблон компоновки (1080×1920)</label>
             <select class="input-select" id="shortsMode">
@@ -1338,11 +1391,22 @@
             </select>
           </div>
           <label class="switch-inline"><input type="checkbox" id="shortsProgBar" checked/><span class="switch-track"></span><span style="font-size:12.5px;">Анимированный прогресс-бар снизу</span></label>
-          <label class="switch-inline"><input type="checkbox" id="shortsKillcam"/><span class="switch-track"></span><span style="font-size:12.5px;">Killcam 1.35× зум на центр/прицел</span></label>
-          <button class="btn btn-soft btn-full" id="btnPickShortsZones">${iconSvg("crop", 14)}<span>Выделить Вебку (1) и Геймплей (2)</span></button>
+          <label class="switch-inline"><input type="checkbox" id="shortsKillcam"/><span class="switch-track"></span><span style="font-size:12.5px;">Killcam 1.35× зум на центр</span></label>
+          <div class="form-grid-2" style="gap:8px;">
+            <button class="btn btn-soft btn-sm" id="btnAiFaceTrack" title="Автоматически найти лицо стримера на видео">🎯 AI Face Track</button>
+            <button class="btn btn-subtle btn-sm" id="btnPickShortsZones">${iconSvg("crop", 13)}<span>Зоны вручную</span></button>
+          </div>
           <button class="btn btn-primary btn-full" id="btnRunShorts">${iconSvg("smartphone", 14)}<span>Создать Shorts 9:16</span></button>
+          <div class="form-grid-2" style="gap:8px;border-top:1px solid var(--border);padding-top:10px;">
+            <button class="btn btn-soft btn-sm" id="btnVirtGs" title="Удалить фон вебки без хромакея и наложить поверх геймплея">🪄 Virtual Green Screen</button>
+            <button class="btn btn-soft btn-sm" id="btnAutoHook" title="Поставить текущий момент (2.6с) в начало ролика как тизер-хук">⚡ AI Авто-хук 3с</button>
+          </div>
         </div>
       `;
+      $("#btnAiFaceTrack").onclick = () => {
+        callBackend("runAiSuiteTask", "face_track", JSON.stringify({ video_path: state.studioFile }));
+        showToast("AI Face Tracking", "Ищем лицо стримера на кадрах...", "info");
+      };
       $("#btnPickShortsZones").onclick = () => {
         const init = [
           state.shortsCam || { x: 0.02, y: 0.55, w: 0.28, h: 0.35, mode: "blur", strength: 10, label: "1. Вебка (верх)" },
@@ -1352,43 +1416,66 @@
       };
       $("#btnRunShorts").onclick = () => {
         const mode = $("#shortsMode").value;
-        const out = appendFileSuffix(state.studioFile, `_shorts_${mode}`, ".mp4");
         callBackend("runStudioAction", JSON.stringify({
           action: "shorts", title: "Рендер Shorts 9:16", subtitle: "1080×1920",
           params: {
-            input_path: state.studioFile, output_path: out, layout: mode,
+            input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, `_shorts_${mode}`, ".mp4"), layout: mode,
             cam_region: mode !== "blur_bg" ? (state.shortsCam || { x: 0.02, y: 0.55, w: 0.28, h: 0.35 }) : null,
             game_region: mode !== "blur_bg" ? (state.shortsGame || { x: 0.22, y: 0.05, w: 0.56, h: 0.90 }) : null,
-            blur_channel_key: $("#shortsBlurCh").value,
-            progress_bar: $("#shortsProgBar").checked,
-            killcam_zoom: $("#shortsKillcam").checked,
+            blur_channel_key: $("#shortsBlurCh").value, progress_bar: $("#shortsProgBar").checked, killcam_zoom: $("#shortsKillcam").checked,
           }
+        }));
+      };
+      $("#btnVirtGs").onclick = () => {
+        callBackend("runStudioAction", JSON.stringify({
+          action: "virtual_greenscreen", title: "Shorts Virtual Green Screen", subtitle: fname,
+          params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_vgs_9x16", ".mp4"), cam_region: state.shortsCam, game_region: state.shortsGame }
+        }));
+      };
+      $("#btnAutoHook").onclick = () => {
+        const ts = mon?.currentTime || state.studioIn || 15;
+        callBackend("runStudioAction", JSON.stringify({
+          action: "auto_hook", title: `AI Авто-хук (${fmtDur(ts)})`, subtitle: fname,
+          params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_hooked", ".mp4"), hook_ts: ts }
         }));
       };
     } else if (state.studioSub === "highlights") {
       const hls = state.highlights.highlights || [];
+      const sent = state.aiChatSentiment;
       host.innerHTML = `
         <div class="studio-inspector-card">
-          <div class="inspector-group-title"><span>Поиск лучших моментов</span></div>
+          <div class="inspector-group-title"><span>Поиск хайлайтов и эмоций чата</span></div>
           <div class="input-row">
             <input class="input" id="hlChatInp" value="${esc(state.studioChatFile)}" placeholder="Файл .chat.json..." />
             <button class="btn btn-subtle btn-sm" id="btnPickChat">${iconSvg("folder", 14)}</button>
           </div>
-          <div class="form-grid-2" style="gap:8px;">
-            <button class="btn btn-primary btn-sm" id="btnScanChat">${iconSvg("flame", 14)}<span>Анализ чата</span></button>
-            <button class="btn btn-soft btn-sm" id="btnScanAudio">${iconSvg("volume", 14)}<span>Громкие пики</span></button>
-            <button class="btn btn-soft btn-sm" id="btnScanEvents">${iconSvg("sparkles", 14)}<span>Смех / Крики</span></button>
-            <button class="btn btn-subtle btn-sm" id="btnBurnChat">${iconSvg("video", 14)}<span>Вшить чат</span></button>
+          <div class="form-grid-2" style="gap:6px;">
+            <button class="btn btn-primary btn-sm" id="btnScanChat">${iconSvg("flame", 13)}<span>Пики чата</span></button>
+            <button class="btn btn-soft btn-sm" id="btnScanAudio">${iconSvg("volume", 13)}<span>Громкие пики</span></button>
+            <button class="btn btn-soft btn-sm" id="btnScanEvents">${iconSvg("sparkles", 13)}<span>Смех / Крики</span></button>
+            <button class="btn btn-soft btn-sm" id="btnScanGameVision">🎯 Игровые (Vision)</button>
+            <button class="btn btn-subtle btn-sm" id="btnChatSentiment">📊 Настроение чата</button>
+            <button class="btn btn-subtle btn-sm" id="btnBurnChat">${iconSvg("video", 13)}<span>Вшить чат</span></button>
           </div>
           <div class="input-row">
             <input class="input" id="hlVodUrl" placeholder="Ссылка на Twitch VOD для чата..." />
             <button class="btn btn-subtle btn-sm" id="btnFetchVodChat">${iconSvg("download", 14)}</button>
           </div>
-          <div class="heatmap-box" style="height:110px;">${renderHeatmapSvg()}</div>
+          ${sent?.ok ? `
+            <div class="yt-meta-box" style="margin-top:4px;padding:10px;">
+              <div style="font-size:12px;font-weight:700;">📊 Настроение чата (${sent.totals.messages} сообщ.)</div>
+              <div class="input-row" style="gap:6px;flex-wrap:wrap;font-size:11.5px;">
+                <span class="diag-pill">😂 Смех: ${sent.totals.laugh} (пик ${sent.peak_laugh_min}м)</span>
+                <span class="diag-pill" style="background:rgba(139,92,246,0.2);color:#c4b5fd;">🔥 Хайп: ${sent.totals.hype} (пик ${sent.peak_hype_min}м)</span>
+                <span class="diag-pill off">💀 Горение: ${sent.totals.salt}</span>
+              </div>
+            </div>
+          ` : ""}
+          <div class="heatmap-box" style="height:96px;">${renderHeatmapSvg()}</div>
           ${hls.length ? `
             <div class="input-row" style="flex-wrap:wrap;gap:6px;">
-              <button class="btn btn-primary btn-sm" id="btnBatchShortsHl">${iconSvg("smartphone", 13)}<span>Все в Shorts (${hls.length})</span></button>
-              <button class="btn btn-soft btn-sm" id="btnBatchCutHl">${iconSvg("scissors", 13)}<span>Нарезать все</span></button>
+              <button class="btn btn-primary btn-sm" id="btnBatchShortsHl">📱 Все в Shorts (${hls.length})</button>
+              <button class="btn btn-soft btn-sm" id="btnBatchCutHl">✂ Нарезать все</button>
               <button class="btn btn-subtle btn-sm" id="btnExportEdl">EDL</button>
             </div>
             <div class="hl-list">
@@ -1404,24 +1491,15 @@
         </div>
       `;
       $("#btnPickChat").onclick = async () => { const p = await callBackend("pickFile", "Чат JSON (*.json)"); if (p) { state.studioChatFile = p; renderStudioInspector(); } };
-      $("#btnScanChat").onclick = () => {
-        const path = $("#hlChatInp").value.trim() || appendFileSuffix(state.studioFile, "", ".chat.json");
-        state.studioChatFile = path;
-        callBackend("analyzeHighlights", "chat", path);
-      };
+      $("#btnScanChat").onclick = () => { const path = $("#hlChatInp").value.trim() || appendFileSuffix(state.studioFile, "", ".chat.json"); state.studioChatFile = path; callBackend("analyzeHighlights", "chat", path); };
       $("#btnScanAudio").onclick = () => callBackend("analyzeHighlights", "audio", state.studioFile);
       $("#btnScanEvents").onclick = () => callBackend("analyzeHighlights", "events", state.studioFile);
+      $("#btnScanGameVision").onclick = () => { callBackend("runAiSuiteTask", "game_events", JSON.stringify({ video_path: state.studioFile })); showToast("AI Vision", "Сканируем Killfeed и игровые события...", "info"); };
+      $("#btnChatSentiment").onclick = () => { callBackend("runAiSuiteTask", "chat_sentiment", JSON.stringify({ video_path: state.studioFile, chat_path: $("#hlChatInp").value.trim() })); };
       $("#btnFetchVodChat").onclick = () => { const u = $("#hlVodUrl").value.trim(); if (u) callBackend("downloadVodChat", u, state.studioFile); };
       $("#btnExportEdl")?.addEventListener("click", () => callBackend("exportHighlightsEdl", state.studioFile, JSON.stringify(hls)));
-      $("#btnBatchCutHl")?.addEventListener("click", () => {
-        callBackend("runStudioAction", JSON.stringify({ action: "batch_highlights", title: `Пакет хайлайтов (${hls.length})`, subtitle: fname, params: { input_path: state.studioFile, timestamps: hls.map((h) => h.timestamp_sec), pad_sec: 20 } }));
-      });
-      $("#btnBatchShortsHl")?.addEventListener("click", () => {
-        callBackend("runStudioAction", JSON.stringify({
-          action: "batch_shorts", title: `Пакет Shorts 9:16 (${hls.length})`, subtitle: fname,
-          params: { input_path: state.studioFile, timestamps: hls.map((h) => h.timestamp_sec), pad_sec: 20, layout: "split", cam_region: state.shortsCam || { x: 0.02, y: 0.55, w: 0.28, h: 0.35 }, game_region: state.shortsGame || { x: 0.22, y: 0.05, w: 0.56, h: 0.90 }, progress_bar: true }
-        }));
-      });
+      $("#btnBatchCutHl")?.addEventListener("click", () => callBackend("runStudioAction", JSON.stringify({ action: "batch_highlights", title: `Пакет хайлайтов (${hls.length})`, subtitle: fname, params: { input_path: state.studioFile, timestamps: hls.map((h) => h.timestamp_sec), pad_sec: 20 } })));
+      $("#btnBatchShortsHl")?.addEventListener("click", () => callBackend("runStudioAction", JSON.stringify({ action: "batch_shorts", title: `Пакет Shorts 9:16 (${hls.length})`, subtitle: fname, params: { input_path: state.studioFile, timestamps: hls.map((h) => h.timestamp_sec), pad_sec: 20, layout: "split", cam_region: state.shortsCam || { x: 0.02, y: 0.55, w: 0.28, h: 0.35 }, game_region: state.shortsGame || { x: 0.22, y: 0.05, w: 0.56, h: 0.90 }, progress_bar: true } })));
       $("#btnBurnChat").onclick = () => {
         const baseChat = ($("#hlChatInp").value.trim() || state.studioChatFile || state.studioFile);
         const assPath = baseChat.endsWith(".chat.json") ? baseChat.replace(/\.chat\.json$/, ".chat.ass") : appendFileSuffix(baseChat, "", ".chat.ass");
@@ -1435,117 +1513,243 @@
         };
       });
     } else if (state.studioSub === "ai") {
+      const sub = state.aiHubSub || "viral";
       host.innerHTML = `
         <div class="studio-inspector-card">
-          <div class="inspector-group-title"><span>Whisper AI Субтитры и Цензура</span></div>
-          <div class="form-grid-2">
-            <div class="field"><label>Модель</label><select class="input-select" id="aiModel">${["tiny", "base", "small", "medium"].map((m) => `<option value="${m}" ${(state.config.whisper_model || "small") === m ? "selected" : ""}>${m}</option>`).join("")}</select></div>
-            <div class="field"><label>Язык / Перевод</label><select class="input-select" id="aiLang"><option value="ru">Русский</option><option value="en">English</option><option value="auto">Авто</option><option value="translate_en">RU → EN Перевод</option></select></div>
+          <div class="inspector-group-title"><span>AI Центр (25 инструментов)</span></div>
+          <div class="split-pills" id="aiHubNav" style="margin-top:0;">
+            <button class="split-pill ${sub === "viral" ? "active" : ""}" data-as="viral">🔥 Клипы</button>
+            <button class="split-pill ${sub === "copilot" ? "active" : ""}" data-as="copilot">💬 Копилот</button>
+            <button class="split-pill ${sub === "speech" ? "active" : ""}" data-as="speech">🎙 Речь/Дубляж</button>
+            <button class="split-pill ${sub === "seo" ? "active" : ""}" data-as="seo">📈 SEO/Посты</button>
           </div>
-          <div class="field"><label>Словарь сленга / ников</label><input class="input" id="aiPrompt" value="${esc(state.config.whisper_prompt || "")}" placeholder="skywhywalker, клатч..." /></div>
-          <div class="field"><label>Слова для аудио-цензуры</label><input class="input" id="aiBanned" value="${esc(state.config.banned_words || "")}" /></div>
-          <div class="input-row" style="flex-wrap:wrap;">
-            <label class="switch-inline"><input type="checkbox" id="aiBurn" checked/><span class="switch-track"></span><span style="font-size:12px;">Вшить субтитры</span></label>
-            <label class="switch-inline"><input type="checkbox" id="aiBeep" checked/><span class="switch-track"></span><span style="font-size:12px;">Писк цензуры</span></label>
-          </div>
-          <div class="form-grid-2" style="gap:8px;">
-            <button class="btn btn-primary btn-sm" id="btnAiSubs">${iconSvg("sparkles", 14)}<span>Субтитры</span></button>
-            <button class="btn btn-soft btn-sm" id="btnAiCensor">${iconSvg("volume", 14)}<span>Цензура</span></button>
-          </div>
-        </div>
-        <div class="studio-inspector-card">
-          <div class="inspector-group-title"><span>AI Конспект и YouTube SEO</span></div>
-          <div class="form-grid-2" style="gap:8px;">
-            <button class="btn btn-soft btn-sm" id="btnGenYtMeta">${iconSvg("sparkles", 14)}<span>YouTube SEO</span></button>
-            <button class="btn btn-subtle btn-sm" id="btnGenDigest">${iconSvg("bookmark", 14)}<span>Конспект</span></button>
-          </div>
-          ${state.ytMeta ? `<div class="yt-meta-box"><div class="input-row" style="justify-content:space-between;"><strong style="font-size:12px;">SEO для YouTube</strong><button class="btn btn-subtle btn-sm" id="btnCopyYtMeta">${iconSvg("copy", 12)}<span>Копировать</span></button></div><textarea readonly>${esc((state.ytMeta.titles || []).join("\n") + "\n\n" + (state.ytMeta.description || ""))}</textarea></div>` : ""}
-          ${state.streamDigest ? `<div class="yt-meta-box"><div class="input-row" style="justify-content:space-between;"><strong style="font-size:12px;">Конспект стрима</strong><button class="btn btn-subtle btn-sm" id="btnCopyDigest">${iconSvg("copy", 12)}<span>Копировать</span></button></div><textarea readonly style="min-height:110px;">${esc(state.streamDigest)}</textarea></div>` : ""}
+
+          ${sub === "viral" ? `
+            <div style="font-size:12px;color:var(--text-muted);">AI объединяет чат, маркеры и эмоции речи, ставит оценку вирусности (0–100) и собирает клипы в 1 клик.</div>
+            <div class="form-grid-2" style="gap:8px;">
+              <button class="btn btn-primary btn-sm" id="btnFindViral">🔥 Найти вирусные клипы</button>
+              <button class="btn btn-soft btn-sm" id="btnAutoMontage">🎬 Авто-монтаж (10м)</button>
+            </div>
+            ${state.aiViralClips.length ? `
+              <div class="hl-list" style="max-height:260px;">
+                ${state.aiViralClips.map((c, idx) => `
+                  <div class="hl-row" style="flex-direction:column;align-items:stretch;gap:6px;">
+                    <div class="input-row" style="justify-content:space-between;">
+                      <span class="mono act-vjump" data-ts="${c.timestamp_sec}" style="cursor:pointer;color:var(--accent-light);font-weight:700;">${fmtDur(c.timestamp_sec)}</span>
+                      <span class="diag-pill" style="padding:2px 7px;font-size:11px;">Вирусность ${c.score}/100</span>
+                    </div>
+                    <div style="font-size:12.5px;font-weight:700;">${esc(c.title)}</div>
+                    <div class="input-row" style="justify-content:space-between;">
+                      <span style="font-size:11px;color:var(--text-muted);">${esc(c.reason)}</span>
+                      <button class="btn btn-primary btn-sm act-vshort" data-idx="${idx}">📱 В Shorts</button>
+                    </div>
+                  </div>
+                `).join("")}
+              </div>
+            ` : ""}
+          ` : sub === "copilot" ? `
+            <div style="font-size:12px;color:var(--text-muted);">Напишите задачу обычным языком — AI-копилот подскажет и даст кнопки запуска в 1 клик.</div>
+            <div class="input-row">
+              <input class="input" id="aiCopilotInp" placeholder="Напр.: найди вирусные клипы и сделай главы YouTube..." />
+              <button class="btn btn-primary btn-sm" id="btnRunCopilot">Отправить</button>
+            </div>
+            ${state.aiCopilot ? `
+              <div class="yt-meta-box" style="margin-top:4px;">
+                <div style="font-size:12.5px;line-height:1.45;">${esc(state.aiCopilot.reply)}</div>
+                <div class="split-pills">
+                  ${(state.aiCopilot.actions || []).map((a) => `<button class="btn btn-soft btn-sm act-cop-run" data-act="${esc(a.id)}">${esc(a.label)}</button>`).join("")}
+                </div>
+              </div>
+            ` : ""}
+          ` : sub === "speech" ? `
+            <div class="form-grid-2">
+              <div class="field"><label>Модель Whisper</label><select class="input-select" id="aiModel">${["tiny", "base", "small", "medium"].map((m) => `<option value="${m}" ${(state.config.whisper_model || "small") === m ? "selected" : ""}>${m}</option>`).join("")}</select></div>
+              <div class="field"><label>Язык / Перевод</label><select class="input-select" id="aiLang"><option value="ru">Русский + Эмодзи</option><option value="en">English + Эмодзи</option><option value="translate_en">RU → EN Перевод</option><option value="auto">Авто</option></select></div>
+            </div>
+            <div class="field"><label>Словарь сленга / ников</label><input class="input" id="aiPrompt" value="${esc(state.config.whisper_prompt || "")}" placeholder="skywhywalker, клатч..." /></div>
+            <div class="field"><label>Бан-лист слов (Ban-Word Shield)</label><input class="input" id="aiBanned" value="${esc(state.config.banned_words || "")}" /></div>
+            <div class="input-row" style="flex-wrap:wrap;">
+              <label class="switch-inline"><input type="checkbox" id="aiBurn" checked/><span class="switch-track"></span><span style="font-size:12px;">Вшить субтитры</span></label>
+              <label class="switch-inline"><input type="checkbox" id="aiBeep" checked/><span class="switch-track"></span><span style="font-size:12px;">Писк цензуры</span></label>
+            </div>
+            <div class="form-grid-2" style="gap:6px;">
+              <button class="btn btn-primary btn-sm" id="btnAiSubs">✨ Субтитры + Эмодзи</button>
+              <button class="btn btn-soft btn-sm" id="btnAiCensor">🔇 Запикать мат</button>
+              <button class="btn btn-subtle btn-sm" id="btnBanShield">🛡 Ban-Word Shield</button>
+              <button class="btn btn-soft btn-sm" id="btnAiDubEn">🌍 AI Дубляж → EN</button>
+            </div>
+            ${state.aiBanHits.length ? `
+              <div class="hl-list" style="max-height:140px;">
+                ${state.aiBanHits.map((h) => `<div class="hl-row"><span class="mono act-bjump" data-ts="${h.t}" style="cursor:pointer;color:#f87171;font-weight:700;">${fmtDur(h.t)}</span><span>🛡 ${esc(h.word)}</span></div>`).join("")}
+              </div>
+            ` : ""}
+          ` : `
+            <div class="form-grid-2" style="gap:6px;">
+              <button class="btn btn-primary btn-sm" id="btnAiChapters">📑 Главы YouTube</button>
+              <button class="btn btn-soft btn-sm" id="btnGenYtMeta">✨ YouTube SEO</button>
+              <button class="btn btn-soft btn-sm" id="btnGenDigest">📝 AI Конспект</button>
+              <button class="btn btn-subtle btn-sm" id="btnAiCritique">⭐ Оценка ролика</button>
+            </div>
+            <div class="input-row" style="gap:6px;">
+              <select class="input-select compact" id="aiPostPlat"><option value="telegram">Telegram</option><option value="vk">VK</option><option value="discord">Discord</option></select>
+              <button class="btn btn-soft btn-sm" style="flex:1;" id="btnAiSocialPost">📣 Написать пост-анонс</button>
+            </div>
+            ${state.aiCritique ? `<div class="yt-meta-box"><strong style="font-size:12px;color:#4ade80;">⭐ Оценка: ${state.aiCritique.score}/100</strong><textarea readonly style="min-height:85px;">${esc(state.aiCritique.critique)}</textarea></div>` : ""}
+            ${state.aiChapters ? `<div class="yt-meta-box"><div class="input-row" style="justify-content:space-between;"><strong style="font-size:12px;">📑 Главы YouTube</strong><button class="btn btn-subtle btn-sm" id="btnCopyChap">Копировать</button></div><textarea readonly>${esc(state.aiChapters)}</textarea></div>` : ""}
+            ${state.aiSocialPost ? `<div class="yt-meta-box"><div class="input-row" style="justify-content:space-between;"><strong style="font-size:12px;">📣 Пост для соцсетей</strong><button class="btn btn-subtle btn-sm" id="btnCopyPost">Копировать</button></div><textarea readonly>${esc(state.aiSocialPost)}</textarea></div>` : ""}
+            ${state.ytMeta ? `<div class="yt-meta-box"><div class="input-row" style="justify-content:space-between;"><strong style="font-size:12px;">YouTube SEO</strong><button class="btn btn-subtle btn-sm" id="btnCopyYtMeta">Копировать</button></div><textarea readonly>${esc((state.ytMeta.titles || []).join("\n") + "\n\n" + (state.ytMeta.description || ""))}</textarea></div>` : ""}
+            ${state.streamDigest ? `<div class="yt-meta-box"><div class="input-row" style="justify-content:space-between;"><strong style="font-size:12px;">Конспект стрима</strong><button class="btn btn-subtle btn-sm" id="btnCopyDigest">Копировать</button></div><textarea readonly>${esc(state.streamDigest)}</textarea></div>` : ""}
+          `}
         </div>
       `;
-      $("#btnAiSubs").onclick = () => {
+      $("#aiHubNav").querySelectorAll(".split-pill").forEach((b) => {
+        b.onclick = () => { state.aiHubSub = b.dataset.as; renderStudioInspector(); };
+      });
+      $("#btnFindViral")?.addEventListener("click", () => { callBackend("runAiSuiteTask", "viral_clips", JSON.stringify({ video_path: state.studioFile, chat_path: state.studioChatFile })); showToast("AI Вирусные клипы", "Анализируем стрим...", "info"); });
+      $("#btnAutoMontage")?.addEventListener("click", () => { callBackend("runStudioAction", JSON.stringify({ action: "auto_montage", title: "AI Авто-монтаж «Лучшее за стрим»", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_best_of", ".mp4"), clips: state.aiViralClips, chat_path: state.studioChatFile } })); });
+      host.querySelectorAll(".act-vjump").forEach((el) => { el.onclick = () => { if (mon) mon.currentTime = Number(el.dataset.ts) || 0; }; });
+      host.querySelectorAll(".act-vshort").forEach((b) => {
+        b.onclick = () => {
+          const c = state.aiViralClips[Number(b.dataset.idx)];
+          if (!c) return;
+          callBackend("runStudioAction", JSON.stringify({ action: "batch_shorts", title: `Shorts: ${c.title}`, subtitle: fmtDur(c.timestamp_sec), params: { input_path: state.studioFile, timestamps: [c.timestamp_sec], pad_sec: 20, layout: "split", cam_region: state.shortsCam || { x: 0.02, y: 0.55, w: 0.28, h: 0.35 }, game_region: state.shortsGame || { x: 0.22, y: 0.05, w: 0.56, h: 0.90 }, progress_bar: true } }));
+        };
+      });
+      const sendCopilot = () => { const q = $("#aiCopilotInp")?.value.trim(); if (q) callBackend("runAiSuiteTask", "copilot", JSON.stringify({ prompt: q, video_path: state.studioFile })); };
+      $("#btnRunCopilot")?.addEventListener("click", sendCopilot);
+      $("#aiCopilotInp")?.addEventListener("keydown", (e) => { if (e.key === "Enter") sendCopilot(); });
+      host.querySelectorAll(".act-cop-run").forEach((b) => {
+        b.onclick = () => {
+          const a = b.dataset.act;
+          if (a === "viral_clips") { state.aiHubSub = "viral"; renderStudioInspector(); callBackend("runAiSuiteTask", "viral_clips", JSON.stringify({ video_path: state.studioFile })); }
+          else if (a === "shorts") { state.studioSub = "shorts"; updateStudioToolTabsUI(); renderStudioInspector(); syncStudioMonitorOverlays(); }
+          else if (a === "subtitles") { state.aiHubSub = "speech"; renderStudioInspector(); }
+          else if (a === "remove_afk") callBackend("runStudioAction", JSON.stringify({ action: "remove_silence_afk", title: "Анти-AFK", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_no_afk") } }));
+          else if (a === "remove_fillers") callBackend("runStudioAction", JSON.stringify({ action: "remove_fillers", title: "AI Слова-паразиты", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_clean_speech") } }));
+          else if (a === "best_frames" || a === "vision_thumb") { state.studioSub = "thumbnail"; updateStudioToolTabsUI(); renderStudioInspector(); syncStudioMonitorOverlays(); callBackend("runAiSuiteTask", a, JSON.stringify({ video_path: state.studioFile, ts: mon?.currentTime || 15 })); }
+          else if (a === "split_30" || a === "split_60") callBackend("runStudioAction", JSON.stringify({ action: "split_parts", title: `Разбивка по ${a === "split_60" ? 60 : 30} мин`, subtitle: fname, params: { input_path: state.studioFile, segment_minutes: a === "split_60" ? 60 : 30 } }));
+          else if (a === "ban_shield") { state.aiHubSub = "speech"; renderStudioInspector(); callBackend("runAiSuiteTask", "ban_shield", JSON.stringify({ video_path: state.studioFile })); }
+          else if (a === "chapters" || a === "social_post") { state.aiHubSub = "seo"; renderStudioInspector(); callBackend("runAiSuiteTask", a, JSON.stringify({ video_path: state.studioFile, platform: "telegram" })); }
+          else if (a === "auto_montage") callBackend("runStudioAction", JSON.stringify({ action: "auto_montage", title: "AI Авто-монтаж", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_best_of", ".mp4") } }));
+          else if (a === "voice_iso") callBackend("runStudioAction", JSON.stringify({ action: "voice_isolate", title: "Изоляция голоса", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_voice_only", ".mp4") } }));
+        };
+      });
+      $("#btnAiSubs")?.addEventListener("click", () => {
         const lv = $("#aiLang").value, isTr = lv === "translate_en";
-        callBackend("runStudioAction", JSON.stringify({ action: "subtitles", title: isTr ? "Whisper Перевод RU → EN" : "Whisper Субтитры", subtitle: $("#aiModel").value, input_path: state.studioFile, model: $("#aiModel").value, language: isTr ? "ru" : lv, task: isTr ? "translate" : "transcribe", burn_subtitles: $("#aiBurn").checked, shorts_style: true, whisper_prompt: $("#aiPrompt").value.trim() }));
-      };
-      $("#btnAiCensor").onclick = () => {
+        callBackend("runStudioAction", JSON.stringify({ action: "subtitles", title: isTr ? "Whisper Перевод RU → EN" : "Whisper Субтитры + Эмодзи", subtitle: $("#aiModel").value, input_path: state.studioFile, model: $("#aiModel").value, language: isTr ? "ru" : lv, task: isTr ? "translate" : "transcribe", burn_subtitles: $("#aiBurn").checked, shorts_style: true, whisper_prompt: $("#aiPrompt").value.trim() }));
+      });
+      $("#btnAiCensor")?.addEventListener("click", () => {
         const lv = $("#aiLang").value;
         callBackend("runStudioAction", JSON.stringify({ action: "censor", title: "AI Аудио-цензура", subtitle: $("#aiModel").value, input_path: state.studioFile, model: $("#aiModel").value, language: lv === "translate_en" ? "ru" : lv, banned_words: $("#aiBanned").value, censor_beep: $("#aiBeep").checked, whisper_prompt: $("#aiPrompt").value.trim() }));
-      };
-      $("#btnGenYtMeta").onclick = () => callBackend("generateYouTubeMeta", state.studioFile);
-      $("#btnGenDigest").onclick = () => callBackend("generateStreamDigest", state.studioFile);
-      $("#btnCopyYtMeta")?.addEventListener("click", () => { navigator.clipboard?.writeText(`${(state.ytMeta.titles || []).join("\n")}\n\n${state.ytMeta.description || ""}\n\nТеги: ${state.ytMeta.tags || ""}`); showToast("Скопировано", "", "success"); });
+      });
+      $("#btnBanShield")?.addEventListener("click", () => { callBackend("runAiSuiteTask", "ban_shield", JSON.stringify({ video_path: state.studioFile, banned_words: $("#aiBanned").value, model: $("#aiModel").value })); showToast("AI Ban-Word Shield", "Сканируем речь на бан-ворды...", "info"); });
+      $("#btnAiDubEn")?.addEventListener("click", () => { callBackend("runStudioAction", JSON.stringify({ action: "ai_dub", title: "AI Дубляж (EN)", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_dub_en", ".mp4"), target_lang: "en" } })); });
+      host.querySelectorAll(".act-bjump").forEach((el) => { el.onclick = () => { if (mon) mon.currentTime = Number(el.dataset.ts) || 0; }; });
+      $("#btnAiChapters")?.addEventListener("click", () => callBackend("runAiSuiteTask", "chapters", JSON.stringify({ video_path: state.studioFile })));
+      $("#btnGenYtMeta")?.addEventListener("click", () => callBackend("generateYouTubeMeta", state.studioFile));
+      $("#btnGenDigest")?.addEventListener("click", () => callBackend("generateStreamDigest", state.studioFile));
+      $("#btnAiCritique")?.addEventListener("click", () => callBackend("runAiSuiteTask", "virality_critique", JSON.stringify({ video_path: state.studioFile, title: state.studioThumb.headline })));
+      $("#btnAiSocialPost")?.addEventListener("click", () => callBackend("runAiSuiteTask", "social_post", JSON.stringify({ video_path: state.studioFile, platform: $("#aiPostPlat").value })));
+      $("#btnCopyChap")?.addEventListener("click", () => { navigator.clipboard?.writeText(state.aiChapters); showToast("Скопировано", "", "success"); });
+      $("#btnCopyPost")?.addEventListener("click", () => { navigator.clipboard?.writeText(state.aiSocialPost); showToast("Скопировано", "", "success"); });
+      $("#btnCopyYtMeta")?.addEventListener("click", () => { navigator.clipboard?.writeText(`${(state.ytMeta.titles || []).join("\n")}\n\n${state.ytMeta.description || ""}`); showToast("Скопировано", "", "success"); });
       $("#btnCopyDigest")?.addEventListener("click", () => { navigator.clipboard?.writeText(state.streamDigest); showToast("Скопировано", "", "success"); });
     } else if (state.studioSub === "thumbnail") {
       const swatches = ["#8b5cf6", "#ef4444", "#22c55e", "#f59e0b", "#3b82f6", "#ec4899"];
       host.innerHTML = `
         <div class="studio-inspector-card">
-          <div class="inspector-group-title"><span>Конструктор обложки 1280×720</span></div>
-          <div style="font-size:12px;color:var(--text-muted);">Перемотайте видео на нужный момент — текст и рамка сразу видны поверх кадра на мониторе!</div>
+          <div class="inspector-group-title"><span>Обложка 1280×720 + AI Vision</span></div>
+          <div class="form-grid-2" style="gap:6px;">
+            <button class="btn btn-soft btn-sm" id="btnBestFrames">🖼 AI 5 лучших кадров</button>
+            <button class="btn btn-soft btn-sm" id="btnVisionIdeas">🤖 AI Идеи по кадру</button>
+          </div>
+          ${state.aiBestFrames.length ? `
+            <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:5px;">
+              ${state.aiBestFrames.map((f) => `<img src="${mediaUrl(f.path)}&t=${Date.now()}" class="act-bf-pick" data-ts="${f.ts}" title="${fmtDur(f.ts)} · Оценка ${f.score}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:6px;border:1px solid var(--border);cursor:pointer;" />`).join("")}
+            </div>
+          ` : ""}
+          ${state.aiThumbIdeas.length ? `
+            <div class="split-pills">
+              ${state.aiThumbIdeas.map((id, i) => `<button type="button" class="split-pill act-idea-pick" data-idx="${i}" style="font-size:11px;">${esc(id.headline)}</button>`).join("")}
+            </div>
+          ` : ""}
           <div class="field"><label>Крупный заголовок</label><input class="input" id="thHeadline" value="${esc(state.studioThumb.headline)}" /></div>
           <div class="field"><label>Плашка-подзаголовок</label><input class="input" id="thSubtitle" value="${esc(state.studioThumb.subtitle)}" /></div>
           <div class="form-grid-2">
             <div class="field"><label>Таймкод кадра</label><input class="input mono" id="thTime" value="${fmtDur(mon?.currentTime || 15)}" /></div>
-            <div class="field"><label>Акцентный цвет</label>
+            <div class="field"><label>Цвет акцента</label>
               <div class="color-swatch-row" style="margin-top:6px;">
                 ${swatches.map((col) => `<button type="button" class="color-swatch ${state.studioThumb.accent === col ? "active" : ""}" data-col="${col}" style="background:${col};"></button>`).join("")}
               </div>
             </div>
           </div>
-          <button class="btn btn-subtle btn-sm" id="btnThSyncNow">${iconSvg("camera", 13)}<span>Взять текущий таймкод с монитора</span></button>
-          <button class="btn btn-primary btn-full" id="btnCreateThumb">${iconSvg("image", 15)}<span>Сохранить обложку .JPG</span></button>
+          <div class="form-grid-2" style="gap:8px;">
+            <button class="btn btn-primary btn-sm" id="btnCreateThumb">🖼 Обложка .JPG</button>
+            <button class="btn btn-soft btn-sm" id="btnQuoteCard">💬 Карточка-цитата</button>
+          </div>
           ${state.lastThumbPath ? `<img src="${mediaUrl(state.lastThumbPath)}&t=${Date.now()}" style="width:100%;border-radius:10px;border:1px solid var(--border);cursor:pointer;" id="btnRevealThumb" title="Открыть в папке" />` : ""}
+          ${state.aiQuotePath ? `<img src="${mediaUrl(state.aiQuotePath)}&t=${Date.now()}" style="width:100%;border-radius:10px;border:1px solid var(--border);cursor:pointer;" id="btnRevealQuote" title="Открыть цитату в папке" />` : ""}
         </div>
       `;
-      $("#thHeadline").oninput = (e) => { state.studioThumb.headline = e.target.value; syncStudioMonitorOverlays(); };
-      $("#thSubtitle").oninput = (e) => { state.studioThumb.subtitle = e.target.value; syncStudioMonitorOverlays(); };
-      host.querySelectorAll(".color-swatch").forEach((s) => {
-        s.onclick = () => {
-          state.studioThumb.accent = s.dataset.col;
-          host.querySelectorAll(".color-swatch").forEach((x) => x.classList.toggle("active", x === s));
+      $("#btnBestFrames").onclick = () => { callBackend("runAiSuiteTask", "best_frames", JSON.stringify({ video_path: state.studioFile })); showToast("AI Подбор кадров", "Ищем 5 самых чётких и эмоциональных кадров...", "info"); };
+      $("#btnVisionIdeas").onclick = () => { callBackend("runAiSuiteTask", "vision_thumb", JSON.stringify({ video_path: state.studioFile, ts: mon?.currentTime || 15 })); showToast("AI Vision", "Анализируем кадр и генерируем заголовки...", "info"); };
+      host.querySelectorAll(".act-bf-pick").forEach((img) => { img.onclick = () => { const ts = Number(img.dataset.ts) || 0; if (mon) mon.currentTime = ts; if ($("#thTime")) $("#thTime").value = fmtDur(ts); }; });
+      host.querySelectorAll(".act-idea-pick").forEach((b) => {
+        b.onclick = () => {
+          const it = state.aiThumbIdeas[Number(b.dataset.idx)];
+          if (!it) return;
+          state.studioThumb = { headline: it.headline, subtitle: it.subtitle, accent: it.accent || state.studioThumb.accent };
+          renderStudioInspector();
           syncStudioMonitorOverlays();
         };
       });
-      $("#btnThSyncNow").onclick = () => { if (mon && $("#thTime")) $("#thTime").value = fmtDur(mon.currentTime || 0); };
+      $("#thHeadline").oninput = (e) => { state.studioThumb.headline = e.target.value; syncStudioMonitorOverlays(); };
+      $("#thSubtitle").oninput = (e) => { state.studioThumb.subtitle = e.target.value; syncStudioMonitorOverlays(); };
+      host.querySelectorAll(".color-swatch").forEach((s) => { s.onclick = () => { state.studioThumb.accent = s.dataset.col; host.querySelectorAll(".color-swatch").forEach((x) => x.classList.toggle("active", x === s)); syncStudioMonitorOverlays(); }; });
       $("#btnCreateThumb").onclick = async () => {
-        const raw = await callBackend("createThumbnail", JSON.stringify({
-          video_path: state.studioFile,
-          timestamp_sec: parseSec($("#thTime").value) ?? (mon?.currentTime || 15),
-          headline: state.studioThumb.headline.trim() || "ЛУЧШИЙ МОМЕНТ",
-          subtitle: state.studioThumb.subtitle.trim() || "TWITCH HIGHLIGHTS",
-          accent_color: state.studioThumb.accent,
-        }));
+        const raw = await callBackend("createThumbnail", JSON.stringify({ video_path: state.studioFile, timestamp_sec: parseSec($("#thTime").value) ?? (mon?.currentTime || 15), headline: state.studioThumb.headline.trim() || "ЛУЧШИЙ МОМЕНТ", subtitle: state.studioThumb.subtitle.trim() || "TWITCH HIGHLIGHTS", accent_color: state.studioThumb.accent }));
         try { const res = JSON.parse(raw || "{}"); if (res.ok && res.output_path) { state.lastThumbPath = res.output_path; renderStudioInspector(); } } catch {}
       };
+      $("#btnQuoteCard").onclick = () => {
+        callBackend("runAiSuiteTask", "quote_card", JSON.stringify({ video_path: state.studioFile, ts: parseSec($("#thTime").value) ?? (mon?.currentTime || 15), quote: state.studioThumb.headline, author: state.studioThumb.subtitle, accent: state.studioThumb.accent }));
+      };
       $("#btnRevealThumb")?.addEventListener("click", () => callBackend("openInExplorer", state.lastThumbPath));
+      $("#btnRevealQuote")?.addEventListener("click", () => callBackend("openInExplorer", state.aiQuotePath));
     } else if (state.studioSub === "effects") {
       const fx = state.studioFx;
       host.innerHTML = `
         <div class="studio-inspector-card">
-          <div class="inspector-group-title"><span>Цветокор и Эффекты (Живой предпросмотр)</span><button class="btn btn-subtle btn-sm" id="btnFxReset">Сброс</button></div>
-          <div class="field">
-            <label>Цветовой пресет</label>
-            <div class="split-pills" id="fxPresets">
-              ${[["none", "Оригинал"], ["vibrant", "Яркий YouTube"], ["cinema", "Кино"], ["crisp", "Чёткий HD"]].map(([id, lbl]) =>
-                `<button type="button" class="split-pill ${fx.color_preset === id ? "active" : ""}" data-cp="${id}">${lbl}</button>`
-              ).join("")}
-            </div>
+          <div class="inspector-group-title"><span>Цветокор и Эффекты</span><button class="btn btn-subtle btn-sm" id="btnFxReset">Сброс</button></div>
+          <div class="split-pills" id="fxPresets" style="margin-top:0;">
+            ${[["none", "Оригинал"], ["vibrant", "Яркий"], ["cinema", "Кино"], ["crisp", "Чёткий HD"]].map(([id, lbl]) =>
+              `<button type="button" class="split-pill ${fx.color_preset === id ? "active" : ""}" data-cp="${id}">${lbl}</button>`
+            ).join("")}
           </div>
           <div class="field"><div class="field-head"><label>Яркость</label><span class="mono" id="fxBrV">${fx.brightness.toFixed(2)}</span></div><input type="range" id="fxBr" min="-0.3" max="0.3" step="0.02" value="${fx.brightness}" /></div>
           <div class="field"><div class="field-head"><label>Контраст</label><span class="mono" id="fxCtV">${fx.contrast.toFixed(2)}</span></div><input type="range" id="fxCt" min="0.7" max="1.5" step="0.02" value="${fx.contrast}" /></div>
           <div class="field"><div class="field-head"><label>Насыщенность</label><span class="mono" id="fxStV">${fx.saturation.toFixed(2)}</span></div><input type="range" id="fxSt" min="0.5" max="1.8" step="0.02" value="${fx.saturation}" /></div>
           <div class="form-grid-3" style="gap:8px;">
             <div class="field"><label>Скорость</label><select class="input-select" id="fxSpd">${[0.5, 0.75, 1, 1.25, 1.5, 2].map((v) => `<option value="${v}" ${fx.speed === v ? "selected" : ""}>${v}×</option>`).join("")}</select></div>
-            <div class="field"><label>Fade In (с)</label><input type="number" class="input mono" id="fxFi" value="${fx.fade_in}" min="0" max="10" step="0.5" /></div>
-            <div class="field"><label>Fade Out (с)</label><input type="number" class="input mono" id="fxFo" value="${fx.fade_out}" min="0" max="10" step="0.5" /></div>
+            <div class="field"><label>Fade In</label><input type="number" class="input mono" id="fxFi" value="${fx.fade_in}" min="0" max="10" step="0.5" /></div>
+            <div class="field"><label>Fade Out</label><input type="number" class="input mono" id="fxFo" value="${fx.fade_out}" min="0" max="10" step="0.5" /></div>
           </div>
-          <div class="field"><div class="field-head"><label>Громкость звука (дБ)</label><span class="mono" id="fxVolV">${fx.volume_db > 0 ? "+" : ""}${fx.volume_db} дБ</span></div><input type="range" id="fxVol" min="-12" max="12" step="1" value="${fx.volume_db}" /></div>
+          <div class="field"><div class="field-head"><label>Громкость (дБ)</label><span class="mono" id="fxVolV">${fx.volume_db > 0 ? "+" : ""}${fx.volume_db} дБ</span></div><input type="range" id="fxVol" min="-12" max="12" step="1" value="${fx.volume_db}" /></div>
           <div class="input-row" style="flex-wrap:wrap;">
             <label class="switch-inline"><input type="checkbox" id="fxSharp" ${fx.sharpen ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Резкость</span></label>
             <label class="switch-inline"><input type="checkbox" id="fxDenoise" ${fx.denoise ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Шумодав</span></label>
             <label class="switch-inline"><input type="checkbox" id="fxVoice" ${fx.voice_enhance ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Голос</span></label>
             <label class="switch-inline"><input type="checkbox" id="fxNorm" ${fx.normalize_audio ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">EBU R128</span></label>
           </div>
-          <button class="btn btn-primary btn-full" id="btnApplyFx">${iconSvg("sparkles", 15)}<span>Применить и отрендерить видео</span></button>
+          <button class="btn btn-primary btn-full" id="btnApplyFx">${iconSvg("sparkles", 14)}<span>Применить цветокор и эффекты</span></button>
+        </div>
+
+        <div class="studio-inspector-card">
+          <div class="inspector-group-title"><span>AI Аудио: DMCA, Музыка и SFX</span></div>
+          <button class="btn btn-soft btn-full btn-sm" id="btnVoiceIso" title="Убрать фоновую музыку и оставить чистый голос (защита от DMCA)">🎙 Изолировать голос (DMCA Safe)</button>
+          <div class="form-grid-2" style="gap:6px;">
+            <button class="btn btn-subtle btn-sm" id="btnMusicDuck" title="Подложить музыку с авто-приглушением на голосе">🎵 Музыка + Ducking</button>
+            <button class="btn btn-subtle btn-sm" id="btnAutoSfx" title="Добавить Vine Boom на пиковые моменты">💥 Авто SFX (Boom)</button>
+          </div>
         </div>
       `;
       const syncFx = () => {
@@ -1556,49 +1760,30 @@
         syncStudioMonitorOverlays();
       };
       ["#fxBr", "#fxCt", "#fxSt", "#fxVol"].forEach((id) => $(id).oninput = syncFx);
-      $("#fxPresets").querySelectorAll(".split-pill").forEach((b) => {
-        b.onclick = () => {
-          fx.color_preset = b.dataset.cp;
-          $("#fxPresets").querySelectorAll(".split-pill").forEach((x) => x.classList.toggle("active", x === b));
-          syncStudioMonitorOverlays();
-        };
-      });
-      $("#btnFxReset").onclick = () => {
-        state.studioFx = { speed: 1, color_preset: "none", brightness: 0, contrast: 1, saturation: 1, sharpen: false, fade_in: 0, fade_out: 0, volume_db: 0, denoise: false, voice_enhance: false, normalize_audio: false };
-        renderStudioInspector();
-        syncStudioMonitorOverlays();
-      };
+      $("#fxPresets").querySelectorAll(".split-pill").forEach((b) => { b.onclick = () => { fx.color_preset = b.dataset.cp; $("#fxPresets").querySelectorAll(".split-pill").forEach((x) => x.classList.toggle("active", x === b)); syncStudioMonitorOverlays(); }; });
+      $("#btnFxReset").onclick = () => { state.studioFx = { speed: 1, color_preset: "none", brightness: 0, contrast: 1, saturation: 1, sharpen: false, fade_in: 0, fade_out: 0, volume_db: 0, denoise: false, voice_enhance: false, normalize_audio: false }; renderStudioInspector(); syncStudioMonitorOverlays(); };
       $("#btnApplyFx").onclick = () => {
-        fx.speed = Number($("#fxSpd").value) || 1;
-        fx.fade_in = Number($("#fxFi").value) || 0;
-        fx.fade_out = Number($("#fxFo").value) || 0;
-        fx.sharpen = $("#fxSharp").checked;
-        fx.denoise = $("#fxDenoise").checked;
-        fx.voice_enhance = $("#fxVoice").checked;
-        fx.normalize_audio = $("#fxNorm").checked;
-        const out = appendFileSuffix(state.studioFile, "_fx", ".mp4");
-        callBackend("runStudioAction", JSON.stringify({
-          action: "studio_effects", title: "Эффекты и цветокор", subtitle: fname,
-          params: { input_path: state.studioFile, output_path: out, ...fx }
-        }));
+        fx.speed = Number($("#fxSpd").value) || 1; fx.fade_in = Number($("#fxFi").value) || 0; fx.fade_out = Number($("#fxFo").value) || 0;
+        fx.sharpen = $("#fxSharp").checked; fx.denoise = $("#fxDenoise").checked; fx.voice_enhance = $("#fxVoice").checked; fx.normalize_audio = $("#fxNorm").checked;
+        callBackend("runStudioAction", JSON.stringify({ action: "studio_effects", title: "Эффекты и цветокор", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_fx", ".mp4"), ...fx } }));
+      };
+      $("#btnVoiceIso").onclick = () => callBackend("runStudioAction", JSON.stringify({ action: "voice_isolate", title: "AI Изоляция голоса (DMCA)", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_voice_safe", ".mp4") } }));
+      $("#btnMusicDuck").onclick = async () => {
+        const mus = await callBackend("pickFile", "Аудио (*.mp3 *.wav *.m4a *.ogg)");
+        if (!mus) return;
+        callBackend("runStudioAction", JSON.stringify({ action: "music_ducking", title: "Фоновая музыка (Smart Ducking)", subtitle: mus.split(/[\\/]/).pop(), params: { input_path: state.studioFile, music_path: mus, output_path: appendFileSuffix(state.studioFile, "_music", ".mp4"), music_vol: 0.24 } }));
+      };
+      $("#btnAutoSfx").onclick = () => {
+        const tsList = (state.highlights?.highlights || []).map((h) => h.timestamp_sec);
+        if (!tsList.length) tsList.push(mon?.currentTime || 5);
+        callBackend("runStudioAction", JSON.stringify({ action: "auto_sfx", title: "AI Авто SFX (Vine Boom)", subtitle: `${tsList.length} эффектов`, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_sfx", ".mp4"), timestamps: tsList, sfx_type: "boom" } }));
       };
     } else if (state.studioSub === "export") {
       host.innerHTML = `
         <div class="studio-inspector-card">
           <div class="inspector-group-title"><span>Экспорт и публикация</span></div>
-          <div class="field">
-            <label>Целевой пресет</label>
-            <select class="input-select" id="expPreset">
-              ${Object.entries(state.exportPresets).map(([id, pr]) => `<option value="${esc(id)}">${esc(pr.label)}</option>`).join("")}
-            </select>
-          </div>
-          <div class="field">
-            <label>Водяной знак (PNG, опционально)</label>
-            <div class="input-row">
-              <input class="input" id="expWmPath" value="${esc(state.config.watermark_path || "")}" placeholder="Логотип в углу..." />
-              <button class="btn btn-subtle btn-sm" id="btnPickWm">${iconSvg("image", 14)}</button>
-            </div>
-          </div>
+          <div class="field"><label>Целевой пресет</label><select class="input-select" id="expPreset">${Object.entries(state.exportPresets).map(([id, pr]) => `<option value="${esc(id)}">${esc(pr.label)}</option>`).join("")}</select></div>
+          <div class="field"><label>Водяной знак (PNG, опционально)</label><div class="input-row"><input class="input" id="expWmPath" value="${esc(state.config.watermark_path || "")}" placeholder="Логотип в углу..." /><button class="btn btn-subtle btn-sm" id="btnPickWm">${iconSvg("image", 14)}</button></div></div>
           <div class="input-row" style="flex-wrap:wrap;">
             <label class="switch-inline"><input type="checkbox" id="expNorm" checked/><span class="switch-track"></span><span style="font-size:12px;">Нормализация -14 LUFS</span></label>
             <label class="switch-inline"><input type="checkbox" id="expVoice"/><span class="switch-track"></span><span style="font-size:12px;">Улучшение голоса</span></label>
@@ -1613,14 +1798,9 @@
       $("#btnPickWm").onclick = async () => { const p = await callBackend("pickFile", "Картинки PNG/WebP (*.png *.webp *.jpg)"); if (p) $("#expWmPath").value = p; };
       $("#btnDoExport").onclick = () => {
         const pid = $("#expPreset").value;
-        callBackend("runStudioAction", JSON.stringify({
-          action: "export_preset", title: `Экспорт (${state.exportPresets[pid]?.label || pid})`, subtitle: fname,
-          params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, `_${pid}`, ".mp4"), preset_id: pid, normalize_audio: $("#expNorm").checked, voice_enhance: $("#expVoice").checked, watermark_path: $("#expWmPath").value.trim() }
-        }));
+        callBackend("runStudioAction", JSON.stringify({ action: "export_preset", title: `Экспорт (${state.exportPresets[pid]?.label || pid})`, subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, `_${pid}`, ".mp4"), preset_id: pid, normalize_audio: $("#expNorm").checked, voice_enhance: $("#expVoice").checked, watermark_path: $("#expWmPath").value.trim() } }));
       };
-      $("#btnExtractMp3").onclick = () => {
-        callBackend("runStudioAction", JSON.stringify({ action: "extract_audio", title: "Извлечение MP3", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_audio", ".mp3"), format: "mp3" } }));
-      };
+      $("#btnExtractMp3").onclick = () => callBackend("runStudioAction", JSON.stringify({ action: "extract_audio", title: "Извлечение MP3", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_audio", ".mp3"), format: "mp3" } }));
       $("#btnPubTgNow").onclick = () => callBackend("publishVideoToTelegram", state.studioFile, "");
     }
   }
@@ -1793,10 +1973,14 @@
         <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:6px;">
           <div class="setting-row-title" style="margin-bottom:4px;">LLM AI для заголовков и описаний YouTube (опционально)</div>
           <div class="setting-row-desc" style="margin-bottom:12px;">Поддерживаются OpenAI, OpenRouter, Gemini OpenAI-compat и локальный Ollama (http://localhost:11434/v1)</div>
-          <div class="form-grid-3">
+          <div class="form-grid-3" style="margin-bottom:12px;">
             <div class="field"><label>API Base URL</label><input class="input" id="cfgLlmUrl" value="${esc(c.llm_api_url || "")}" placeholder="https://api.openai.com/v1" /></div>
             <div class="field"><label>API Key</label><input type="password" class="input" id="cfgLlmKey" value="${esc(c.llm_api_key || "")}" placeholder="sk-..." /></div>
             <div class="field"><label>Модель</label><input class="input" id="cfgLlmModel" value="${esc(c.llm_model || "gpt-4o-mini")}" /></div>
+          </div>
+          <div class="field">
+            <label>AI Brand Voice — персональный стиль вашего канала (используется во всех AI-генераторах)</label>
+            <input class="input" id="cfgBrandVoice" value="${esc(c.ai_brand_voice || "")}" placeholder="Дерзкий молодёжный стиль, короткие кликбейтные заголовки, эмодзи 🔥💀, аудитория CS2/GTA..." />
           </div>
         </div>
       </div>
@@ -1955,6 +2139,7 @@
       llm_api_url: $("#cfgLlmUrl").value.trim(),
       llm_api_key: $("#cfgLlmKey").value.trim(),
       llm_model: $("#cfgLlmModel").value.trim() || "gpt-4o-mini",
+      ai_brand_voice: $("#cfgBrandVoice")?.value.trim() || "",
       telegram_bot_token: $("#cfgTgTok").value.trim(),
       telegram_chat_id: $("#cfgTgChat").value.trim(),
       telegram_bot_enabled: $("#cfgTgBot").checked,
@@ -2501,6 +2686,11 @@
     $("#bsDeleteZone").onclick = () => {
       if (bs.selected >= 0) { bs.regions.splice(bs.selected, 1); bs.selected = Math.min(bs.selected, bs.regions.length - 1); renderBsZones(); }
     };
+    $("#bsPrivacyFaces")?.addEventListener("click", () => {
+      if (!bs.mediaPath) return showToast("AI Лица", "Сначала загрузите видео или кадр", "info");
+      callBackend("runAiSuiteTask", "privacy_blur", JSON.stringify({ video_path: bs.mediaPath }));
+      showToast("AI Приватность", "Ищем лица в кадре...", "info");
+    });
     $("#bsClearZones").onclick = () => { bs.regions = []; bs.selected = -1; renderBsZones(); };
 
     // Scene preset switching
@@ -2952,6 +3142,30 @@
     } else if (type === "stream_digest") {
       state.streamDigest = data?.text || "";
       if (state.page === "studio") renderStudioPage();
+    } else if (type === "ai_suite_result") {
+      const t = data?.task;
+      const d = data?.data || {};
+      if (t === "viral_clips") { state.aiViralClips = d.clips || []; if (state.page === "studio") renderStudioInspector(); }
+      else if (t === "face_track" && d.ok && d.region) { state.shortsCam = d.region; if (state.page === "studio") renderStudioInspector(); }
+      else if (t === "speech_search") { state.speechSearchHits = d.hits || []; if (state.page === "library") renderLibrarySpeechHits(); }
+      else if (t === "privacy_blur" && d.ok && Array.isArray(d.regions)) {
+        d.regions.forEach((r) => bs.regions.push(r));
+        bs.selected = bs.regions.length - 1;
+        renderBsZones();
+      }
+      else if (t === "chapters") { state.aiChapters = d.text || ""; if (state.page === "studio") renderStudioInspector(); }
+      else if (t === "copilot") { state.aiCopilot = d; if (state.page === "studio") renderStudioInspector(); }
+      else if (t === "vision_thumb") { state.aiThumbIdeas = d.ideas || []; if (state.page === "studio") renderStudioInspector(); }
+      else if (t === "ban_shield") { state.aiBanHits = d.hits || []; if (state.page === "studio") { renderStudioInspector(); renderStudioTimelineUI(); } }
+      else if (t === "quote_card" && d.ok) { state.aiQuotePath = d.path || ""; if (state.page === "studio") renderStudioInspector(); }
+      else if (t === "game_events") {
+        state.highlights = { mode: "events", heatmap: state.highlights.heatmap || [], highlights: d.events || [] };
+        if (state.page === "studio") { renderStudioInspector(); renderStudioTimelineUI(); }
+      }
+      else if (t === "best_frames") { state.aiBestFrames = d.frames || []; if (state.page === "studio") renderStudioInspector(); }
+      else if (t === "social_post") { state.aiSocialPost = d.text || ""; if (state.page === "studio") renderStudioInspector(); }
+      else if (t === "virality_critique") { state.aiCritique = d; if (state.page === "studio") renderStudioInspector(); }
+      else if (t === "chat_sentiment") { state.aiChatSentiment = d; if (state.page === "studio") renderStudioInspector(); }
     } else if (type === "catalog") {
       state.catalogLoading = false;
       state.catalogError = data.error || "";

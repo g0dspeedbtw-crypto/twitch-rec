@@ -1690,6 +1690,109 @@ class StudioToolWorker(QThread):
                     return
                 self._emit_done(rc == 0 and os.path.exists(out), out if rc == 0 else err, "Эффекты применены")
 
+            elif self.action == "remove_fillers":
+                from app.ai_suite import detect_filler_and_pause_cuts
+                inp = self.params["input_path"]
+                out = self.params["output_path"]
+                self.progress_updated.emit(self.job_id, 15.0, "Whisper: поиск слов-паразитов и пауз...")
+                ok, keeps, removed, msg = detect_filler_and_pause_cuts(
+                    inp,
+                    model_size=self.params.get("model", self.app_config.whisper_model or "small"),
+                    language=self.params.get("language", "ru"),
+                )
+                if not ok:
+                    self._emit_done(False, msg, "")
+                    return
+                if not removed:
+                    self._emit_done(False, msg, "")
+                    return
+                self.progress_updated.emit(self.job_id, 60.0, f"Вырезаем {len(removed)} пауз/паразитов...")
+                from app.tools import cut_video_segments
+                ok2, err2 = cut_video_segments(inp, keeps, out, encoder=enc, video_quality=self.app_config.video_quality)
+                self._emit_done(ok2 and os.path.exists(out), out if ok2 else err2, f"Очищено ({len(removed)} удал.)")
+
+            elif self.action == "voice_isolate":
+                from app.ai_suite import isolate_voice_dmca_safe
+                inp = self.params["input_path"]
+                out = self.params["output_path"]
+                self.progress_updated.emit(self.job_id, 25.0, "AI Изоляция голоса (DMCA Safe)...")
+                ok, res = isolate_voice_dmca_safe(inp, out)
+                self._emit_done(ok, res, "Голос изолирован")
+
+            elif self.action == "auto_hook":
+                from app.ai_suite import create_hooked_short
+                inp = self.params["input_path"]
+                out = self.params["output_path"]
+                hook_ts = float(self.params.get("hook_ts", 15.0))
+                self.progress_updated.emit(self.job_id, 20.0, "Создание AI Авто-хука (первые 3 сек)...")
+                ok, res = create_hooked_short(inp, out, hook_ts, encoder=enc, video_quality=self.app_config.video_quality)
+                self._emit_done(ok, res, "Ролик с Авто-хуком готов")
+
+            elif self.action == "auto_montage":
+                from app.ai_suite import build_auto_montage, find_viral_clips
+                inp = self.params["input_path"]
+                out = self.params["output_path"]
+                clips = self.params.get("clips") or []
+                if not clips:
+                    self.progress_updated.emit(self.job_id, 15.0, "AI Поиск лучших моментов стрима...")
+                    clips = find_viral_clips(inp, self.params.get("chat_path", ""), self.app_config, max_clips=14)
+                self.progress_updated.emit(self.job_id, 55.0, f"Сборка авто-монтажа ({len(clips)} моментов)...")
+                ok, res = build_auto_montage(inp, out, clips)
+                self._emit_done(ok, res, f"Авто-монтаж готов ({len(clips)} сцен)")
+
+            elif self.action == "ai_dub":
+                from app.ai_suite import dub_video_ai
+                inp = self.params["input_path"]
+                out = self.params["output_path"]
+                lang = self.params.get("target_lang", "en")
+                self.progress_updated.emit(self.job_id, 20.0, f"AI Перевод и озвучка ({lang.upper()})...")
+                ok, res = dub_video_ai(inp, out, target_lang=lang, cfg=self.app_config)
+                self._emit_done(ok, res, f"AI Дубляж ({lang.upper()}) готов")
+
+            elif self.action == "music_ducking":
+                from app.ai_suite import mix_music_with_ducking
+                inp = self.params["input_path"]
+                mus = self.params["music_path"]
+                out = self.params["output_path"]
+                self.progress_updated.emit(self.job_id, 25.0, "Микширование музыки с авто-приглушением...")
+                ok, res = mix_music_with_ducking(inp, mus, out, float(self.params.get("music_vol", 0.24)))
+                self._emit_done(ok, res, "Фоновая музыка добавлена")
+
+            elif self.action == "auto_sfx":
+                from app.ai_suite import add_auto_sfx
+                inp = self.params["input_path"]
+                out = self.params["output_path"]
+                ts_list = self.params.get("timestamps") or []
+                sfx_type = self.params.get("sfx_type", "boom")
+                self.progress_updated.emit(self.job_id, 30.0, f"Наложение SFX ({sfx_type}) на {len(ts_list)} пиков...")
+                ok, res = add_auto_sfx(inp, out, ts_list, sfx_type=sfx_type)
+                self._emit_done(ok, res, "Авто-SFX добавлены")
+
+            elif self.action == "virtual_greenscreen":
+                from app.ai_suite import create_virtual_greenscreen_short
+                inp = self.params["input_path"]
+                out = self.params["output_path"]
+                self.progress_updated.emit(self.job_id, 20.0, "Рендер Shorts 9:16 (Virtual Green Screen)...")
+                ok, res = create_virtual_greenscreen_short(
+                    inp, out, self.params.get("cam_region"), self.params.get("game_region"),
+                    encoder=enc, video_quality=self.app_config.video_quality,
+                )
+                self._emit_done(ok, res, "Virtual Green Screen Shorts готов")
+
+            elif self.action == "smart_scene_cut":
+                from app.ai_suite import detect_brb_and_loading_scenes
+                from app.tools import cut_video_segments
+                inp = self.params["input_path"]
+                out = self.params["output_path"]
+                self.progress_updated.emit(self.job_id, 20.0, "AI Поиск экранов «Скоро начнём» / BRB...")
+                keeps = detect_brb_and_loading_scenes(inp)
+                if not keeps:
+                    self._emit_done(False, "Не найдено сцен для вырезания", "")
+                    return
+                self.progress_updated.emit(self.job_id, 60.0, f"Сборка активных сцен ({len(keeps)} фрагм.)...")
+                ok, err = cut_video_segments(inp, keeps, out, encoder=enc, video_quality=self.app_config.video_quality)
+                self._emit_done(ok and os.path.exists(out), out if ok else err, "BRB/Загрузки вырезаны")
+
         except Exception as exc:
             self._emit_done(False, str(exc), "")
 

@@ -867,7 +867,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         f"Dialogue: 0,{_fmt_ass_time(seg.start)},{_fmt_ass_time(seg.end)},Default,,0,0,0,,{txt}\n"
                     )
         ass_path.write_text("".join(ass_lines), encoding="utf-8")
-        self.log_message.emit(f"[AI] Субтитры сохранены: {srt_path.name} и {ass_path.name}")
+        try:
+            from app.ai_suite import enhance_subtitles_with_emojis
+            enhance_subtitles_with_emojis(str(ass_path))
+        except Exception:
+            pass
+        self.log_message.emit(f"[AI] Субтитры с AI-эмодзи сохранены: {srt_path.name} и {ass_path.name}")
 
         if not self.burn_subtitles:
             self.progress_updated.emit(self.job_id, 100.0, f"Готово: {srt_path.name}")
