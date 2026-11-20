@@ -42,7 +42,7 @@ def get_data_dir() -> Path:
 
 BASE_DIR = get_resource_dir()
 DATA_DIR = get_data_dir()
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.4.0"
 DEFAULT_GITHUB_REPO = "g0dspeedbtw-crypto/twitch-rec"
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -307,6 +307,7 @@ class AppConfig:
     encoder: str = "auto"
     video_quality: int = 19
     container: str = "mp4"
+    default_segment_minutes: int = 0
     vod_concurrent_fragments: int = 4
     # Network & Auth (#12)
     twitch_oauth_token: str = ""

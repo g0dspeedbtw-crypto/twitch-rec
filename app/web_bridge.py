@@ -687,7 +687,14 @@ class AppBridge(QObject):
             if self.config.get_channel(key):
                 continue
             self.config.channels.append(
-                ChannelConfig(username=uname, platform=plat, quality="best", auto_record=True, blur_mode="postprocess")
+                ChannelConfig(
+                    username=uname,
+                    platform=plat,
+                    quality="best",
+                    auto_record=True,
+                    blur_mode="postprocess",
+                    segment_minutes=int(getattr(self.config, "default_segment_minutes", 0) or 0),
+                )
             )
             added.append(uname)
         if added:
@@ -1606,7 +1613,7 @@ class AppBridge(QObject):
         d = json.loads(cfg_json)
         for k in (
             "output_dir", "check_interval_sec", "encoder", "video_quality", "container",
-            "vod_concurrent_fragments", "twitch_oauth_token", "proxy_url",
+            "default_segment_minutes", "vod_concurrent_fragments", "twitch_oauth_token", "proxy_url",
             "min_free_gb", "hard_disk_guard", "auto_cleanup_old", "max_age_days", "minimize_to_tray",
             "start_with_windows", "marker_hotkey", "telegram_bot_token", "telegram_chat_id",
             "telegram_bot_enabled", "discord_webhook_url", "notify_on_live", "notify_on_finish", "notify_on_blur",
@@ -1684,6 +1691,17 @@ class AppBridge(QObject):
     @Slot()
     def openLogFile(self) -> None:
         self.openInExplorer(str(LOG_PATH) if LOG_PATH.exists() else str(DATA_DIR))
+
+    @Slot(result=str)
+    def getChangelog(self) -> str:
+        from app.config import get_resource_dir
+        for cand in (get_resource_dir() / "CHANGELOG.md", Path(__file__).resolve().parent.parent / "CHANGELOG.md"):
+            if cand.is_file():
+                try:
+                    return cand.read_text(encoding="utf-8")
+                except Exception:
+                    pass
+        return f"# Twitch Recorder Pro v{APP_VERSION}\n\nФайл CHANGELOG.md не найден."
 
     # ------------------------------------------------------------------ #41 Interactive Telegram Bot
     def _sync_telegram_bot(self) -> None:

@@ -30,7 +30,10 @@
         </div>
         <div class="brand-meta">
           <div class="brand-title">Twitch Recorder</div>
-          <div class="brand-sub">Studio Suite · Pro</div>
+          <button class="brand-ver-pill" id="btnOpenChangelog" title="Открыть историю изменений (Changelog)">
+            <span class="ver-dot"></span>
+            <span id="brandVerText">v2.4.0 · Что нового</span>
+          </button>
         </div>
       </div>
 
@@ -325,8 +328,29 @@
         <span class="player-title" id="playerTitle">Видео</span>
         <button class="btn-icon" id="playerClose"><i data-icon="x"></i></button>
       </div>
-      <video id="lightboxVideo" controls autoplay playsinline></video>
+      <div class="player-video-wrap">
+        <video id="lightboxVideo" controls autoplay playsinline></video>
+        <div class="player-overlay hidden" id="playerOverlay">
+          <div class="player-spinner" id="playerSpinner"></div>
+          <div class="player-overlay-text" id="playerOverlayText">Подключение к потоку...</div>
+          <button class="btn btn-primary btn-sm hidden" id="btnPlayerRetry"><i data-icon="refresh"></i><span>Повторить</span></button>
+        </div>
+      </div>
       <div class="player-markers-row" id="playerMarkersRow"></div>
+    </div>
+  </div>
+
+  <!-- ==================== CHANGELOG MODAL ==================== -->
+  <div class="modal-backdrop hidden" id="changelogModal">
+    <div class="changelog-modal">
+      <div class="drawer-head">
+        <div>
+          <div class="drawer-title">История изменений (Changelog)</div>
+          <div class="drawer-sub">Все новые функции, улучшения и исправления Twitch Recorder Pro</div>
+        </div>
+        <button class="btn-icon" id="changelogClose"><i data-icon="x"></i></button>
+      </div>
+      <div class="changelog-body" id="changelogBody"></div>
     </div>
   </div>
 

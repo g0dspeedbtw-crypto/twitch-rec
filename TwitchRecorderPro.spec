@@ -59,6 +59,7 @@ fw_datas, fw_bins, fw_hidden = collect_all("faster_whisper")
 datas = [
     (str(ROOT / "web"), "web"),
     (str(ROOT / "assets"), "assets"),
+    (str(ROOT / "CHANGELOG.md"), "."),
     *sl_datas,
     *slc_datas,
     *yt_datas,

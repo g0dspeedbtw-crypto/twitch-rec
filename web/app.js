@@ -167,6 +167,30 @@
         </div>
       </div>
 
+      <div class="live-kpi-strip">
+        <div class="kpi-card">
+          <div>
+            <div class="kpi-label">Отслеживается каналов</div>
+            <div class="kpi-val">${state.channels.length}</div>
+          </div>
+          <div class="kpi-icon">${iconSvg("radio", 18)}</div>
+        </div>
+        <div class="kpi-card">
+          <div>
+            <div class="kpi-label">Сейчас в эфире</div>
+            <div class="kpi-val live">${onlineCnt}</div>
+          </div>
+          <div class="kpi-icon live">${iconSvg("play", 16)}</div>
+        </div>
+        <div class="kpi-card">
+          <div>
+            <div class="kpi-label">Идёт запись</div>
+            <div class="kpi-val rec">${recCnt}</div>
+          </div>
+          <div class="kpi-icon rec">${iconSvg("record", 16)}</div>
+        </div>
+      </div>
+
       <div class="card add-bar">
         <select class="input-select" id="addPlat">
           <option value="twitch">Twitch</option>
@@ -223,6 +247,15 @@
     bindChannelCardEvents(root, applyChannelsReturn);
   }
 
+  const SPLIT_PRESETS = [
+    { val: 0, label: "1 файл" },
+    { val: 15, label: "По 15 мин" },
+    { val: 30, label: "По 30 мин" },
+    { val: 60, label: "По 1 часу" },
+    { val: 120, label: "По 2 часа" },
+    { val: 180, label: "По 3 часа" },
+  ];
+
   function renderChannelCard(ch) {
     const st = ch.status || {};
     const live = !!st.is_live;
@@ -230,6 +263,8 @@
     const tel = ch.telemetry || {};
     const zonesCnt = (ch.blur_regions || []).length;
     const presets = Object.keys(ch.blur_presets || { "Основной": [] });
+    const segMin = Number(ch.segment_minutes || 0);
+    const hasCustomSeg = segMin > 0 && !SPLIT_PRESETS.some((p) => p.val === segMin);
     const bust = state.previewBust[ch.key] || 1;
     const thumbHtml = live && ch.has_preview
       ? `<img src="/media/live/${encodeURIComponent(ch.key)}?t=${bust}" alt="" />`
@@ -240,7 +275,7 @@
         <div class="ch-top">
           <div class="ch-thumb ${live ? "act-watch-live" : ""}" title="${live ? "Смотреть эфир в мини-плеере без рекламы" : ""}" style="${live ? "cursor:pointer;" : ""}">
             ${thumbHtml}
-            ${live ? `<div class="media-play-hover"><div class="play-circle" style="width:34px;height:34px;">${iconSvg("play", 15)}</div></div>` : ""}
+            ${live ? `<div class="media-play-hover"><div class="play-circle" style="width:36px;height:36px;">${iconSvg("play", 16)}</div><span style="font-size:10.5px;font-weight:700;color:#fff;">Смотреть</span></div>` : ""}
             <span class="ch-status-badge ${rec ? "rec" : (live ? "live" : "off")}">
               ${rec ? `<span class="pulse-dot"></span>ЗАПИСЬ` : (live ? `<span class="pulse-dot"></span>В ЭФИРЕ` : "ОФФЛАЙН")}
             </span>
@@ -250,6 +285,7 @@
             <div class="ch-name-row">
               <span class="ch-name">${esc(ch.username)}</span>
               <span class="plat-tag plat-${esc(ch.platform)}">${esc(ch.platform)}</span>
+              ${segMin > 0 ? `<span class="plat-tag" style="background:rgba(139,92,246,0.18);color:var(--accent-light);">✂ ${segMin >= 60 && segMin % 60 === 0 ? `${segMin / 60}ч` : `${segMin}м`}</span>` : ""}
               ${ch.schedule_enabled ? `<span class="plat-tag" style="background:rgba(255,255,255,0.06);color:var(--text-secondary)">${esc(ch.schedule_start)}–${esc(ch.schedule_end)}</span>` : ""}
             </div>
             <div class="ch-game">${live ? esc(st.game || "Прямой эфир") : (st.error ? esc(st.error) : "Стример не в сети")}</div>
@@ -260,8 +296,8 @@
               ? `<button class="btn btn-danger btn-sm act-stop">${iconSvg("stop", 12)}<span>Стоп</span></button>`
               : `<button class="btn ${live ? "btn-success" : "btn-subtle"} btn-sm act-rec">${iconSvg("record", 12)}<span>Запись</span></button>`}
             <div style="display:flex;gap:4px;">
-              ${live ? `<button class="btn-icon act-watch-live" title="Смотреть эфир без рекламы">${iconSvg("play", 14)}</button>` : ""}
-              <button class="btn-icon act-settings" title="Расписание, фильтры, чат, авто-клипы">${iconSvg("gear", 15)}</button>
+              ${live ? `<button class="btn-icon act-watch-live" title="Смотреть эфир в мини-плеере без рекламы">${iconSvg("play", 14)}</button>` : ""}
+              <button class="btn-icon act-settings" title="Параметры канала, расписание, чат, авто-клипы">${iconSvg("gear", 15)}</button>
               <button class="btn-icon danger act-del" title="Удалить канал">${iconSvg("trash", 15)}</button>
             </div>
           </div>
@@ -278,12 +314,16 @@
         ` : ""}
 
         <div class="ch-controls">
-          <select class="input-select compact act-quality" title="Качество потока">
+          <select class="input-select compact act-quality" title="Качество записи">
             ${QUALITIES.map((q) => `<option value="${q}" ${ch.quality === q ? "selected" : ""}>${q}</option>`).join("")}
           </select>
+          <select class="input-select compact act-segmin" title="Разбивка записи на части">
+            ${SPLIT_PRESETS.map((p) => `<option value="${p.val}" ${segMin === p.val ? "selected" : ""}>${p.label}</option>`).join("")}
+            ${hasCustomSeg ? `<option value="${segMin}" selected>По ${segMin} мин</option>` : ""}
+          </select>
           <select class="input-select compact act-blurmode" title="Режим блюра">
-            <option value="postprocess" ${ch.blur_mode === "postprocess" ? "selected" : ""}>Постобработка</option>
-            <option value="realtime" ${ch.blur_mode === "realtime" ? "selected" : ""}>Реалтайм (GPU)</option>
+            <option value="postprocess" ${ch.blur_mode === "postprocess" ? "selected" : ""}>Пост-блюр</option>
+            <option value="realtime" ${ch.blur_mode === "realtime" ? "selected" : ""}>Реалтайм</option>
             <option value="none" ${ch.blur_mode === "none" ? "selected" : ""}>Без блюра</option>
           </select>
           ${presets.length > 1 ? `
@@ -327,6 +367,12 @@
       card.querySelector(".act-quality")?.addEventListener("change", async (e) => {
         const raw = await callBackend("updateChannelField", key, JSON.stringify({ quality: e.target.value }));
         if (applyChannelsReturn) applyChannelsReturn(raw);
+      });
+      card.querySelector(".act-segmin")?.addEventListener("change", async (e) => {
+        const mins = Math.max(0, Number(e.target.value) || 0);
+        const raw = await callBackend("updateChannelField", key, JSON.stringify({ segment_minutes: mins }));
+        if (applyChannelsReturn) applyChannelsReturn(raw);
+        showToast("Разбивка записи", mins > 0 ? `Канал ${ch.username}: части по ${mins} мин` : `Канал ${ch.username}: одним файлом`, "info");
       });
       card.querySelector(".act-blurmode")?.addEventListener("change", async (e) => {
         const raw = await callBackend("updateChannelField", key, JSON.stringify({ blur_mode: e.target.value }));
@@ -790,7 +836,22 @@
               </div>
             </div>
           ` : ""}
-          <div style="border-top:1px solid var(--border);padding-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+          <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <div>
+              <div style="font-size:13px;font-weight:600;">Разбить видео на равные части (без перекодирования)</div>
+              <div style="font-size:11.5px;color:var(--text-muted);">Мгновенно нарежет длинный стрим или VOD на куски по 30 мин, 1 часу и т.д.</div>
+            </div>
+            <div style="flex:1"></div>
+            <div class="input-row" style="flex-wrap:wrap;">
+              <button class="split-pill st-split-preset" data-min="15">15 мин</button>
+              <button class="split-pill st-split-preset active" data-min="30">30 мин</button>
+              <button class="split-pill st-split-preset" data-min="60">1 час</button>
+              <button class="split-pill st-split-preset" data-min="120">2 часа</button>
+              <input type="number" class="input mono" id="stSplitMin" value="30" min="1" max="600" style="width:74px;" title="Минут в одной части" />
+              <button class="btn btn-primary btn-sm" id="btnSplitParts">${iconSvg("scissors", 14)}<span>Разбить</span></button>
+            </div>
+          </div>
+          <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
             <span style="color:var(--text-secondary);font-size:13px;">Склейка нескольких записей или клипов в один файл</span>
             <label class="switch-inline"><input type="checkbox" id="catNorm"/><span class="switch-track"></span><span>Выровнять в 1080p60</span></label>
             <div style="flex:1"></div>
@@ -1039,6 +1100,23 @@
       callBackend("runStudioAction", JSON.stringify({
         action: "concat", title: `Склейка (${files.length} файлов)`, subtitle: out.split(/[\\/]/).pop(),
         params: { input_paths: files, output_path: out, normalize: $("#catNorm").checked }
+      }));
+    });
+    root.querySelectorAll(".st-split-preset").forEach((b) => {
+      b.onclick = () => {
+        root.querySelectorAll(".st-split-preset").forEach((x) => x.classList.remove("active"));
+        b.classList.add("active");
+        if ($("#stSplitMin")) $("#stSplitMin").value = b.dataset.min;
+      };
+    });
+    $("#btnSplitParts")?.addEventListener("click", () => {
+      if (!state.studioFile) return showToast("Выберите видео", "Укажите видеофайл выше", "error");
+      const mins = Math.max(1, Number($("#stSplitMin")?.value) || 30);
+      callBackend("runStudioAction", JSON.stringify({
+        action: "split_parts",
+        title: `Разбивка по ${mins >= 60 && mins % 60 === 0 ? `${mins / 60} ч` : `${mins} мин`}`,
+        subtitle: state.studioFile.split(/[\\/]/).pop(),
+        params: { input_path: state.studioFile, segment_minutes: mins }
       }));
     });
 
@@ -1303,11 +1381,16 @@
         </div>
         <div class="form-grid-4" style="margin-bottom:14px;">
           <div class="field"><label>Формат</label><select class="input-select" id="cfgCont"><option ${c.container === "mp4" ? "selected" : ""}>mp4</option><option ${c.container === "mkv" ? "selected" : ""}>mkv</option></select></div>
+          <div class="field">
+            <label>Разбивка новых каналов</label>
+            <select class="input-select" id="cfgDefSeg">
+              ${SPLIT_PRESETS.map((p) => `<option value="${p.val}" ${Number(c.default_segment_minutes || 0) === p.val ? "selected" : ""}>${p.label}</option>`).join("")}
+            </select>
+          </div>
           <div class="field"><label>Проверка эфиров (сек)</label><input type="number" class="input" id="cfgInterval" value="${c.check_interval_sec || 30}" /></div>
-          <div class="field"><label>Потоков VOD</label><input type="number" class="input" id="cfgVodFrag" value="${c.vod_concurrent_fragments || 4}" /></div>
           <div class="field"><label>Предупр. диска (&lt; ГБ)</label><input type="number" class="input" id="cfgMinGb" value="${c.min_free_gb || 15}" /></div>
         </div>
-        <div class="form-grid-3" style="margin-bottom:14px;">
+        <div class="form-grid-4" style="margin-bottom:14px;">
           <div class="field">
             <label>Видеокодек (GPU / CPU)</label>
             <select class="input-select" id="cfgEnc">
@@ -1315,8 +1398,9 @@
               ${encs.map((e) => `<option value="${esc(e)}" ${c.encoder === e ? "selected" : ""}>${esc(e)}</option>`).join("")}
             </select>
           </div>
-          <div class="field"><label>Качество CQ/CRF (23 оптимум)</label><input type="number" class="input" id="cfgCq" value="${c.video_quality || 23}" /></div>
-          <div class="field"><label>Лимит одноврем. рендеров GPU</label><input type="number" class="input" id="cfgMaxBlurs" value="${c.max_concurrent_blurs || 1}" min="1" max="6" /></div>
+          <div class="field"><label>Качество CQ/CRF (19 оптимум)</label><input type="number" class="input" id="cfgCq" value="${c.video_quality || 19}" /></div>
+          <div class="field"><label>Потоков загрузки VOD</label><input type="number" class="input" id="cfgVodFrag" value="${c.vod_concurrent_fragments || 4}" /></div>
+          <div class="field"><label>Лимит одноврем. блюров GPU</label><input type="number" class="input" id="cfgMaxBlurs" value="${c.max_concurrent_blurs || 1}" min="1" max="6" /></div>
         </div>
         <div class="setting-row">
           <div><div class="setting-row-title">Smart Segment Blur (умный точечный блюр)</div><div class="setting-row-desc">Перекодирует ТОЛЬКО секунды, где виден баннер, а остальной стрим копирует без потерь (в 5–10 раз быстрее)</div></div>
@@ -1518,7 +1602,10 @@
             <div class="setting-row-title">Облачные обновления (GitHub Releases)</div>
             <div class="setting-row-desc">Автоматическая загрузка с проверкой SHA-256 и установка на Windows и macOS</div>
           </div>
-          <span class="diag-pill">Текущая версия: v${esc(d.app_version || "2.2.0")}</span>
+          <div class="input-row">
+            <span class="diag-pill">Текущая версия: v${esc(d.app_version || "2.4.0")}</span>
+            <button class="btn btn-soft btn-sm" id="btnOpenClSettings">${iconSvg("sparkles", 14)}<span>История изменений</span></button>
+          </div>
         </div>
         <div class="field" style="margin-bottom:12px;">
           <label>Репозиторий GitHub (owner/repo или ссылка)</label>
@@ -1535,6 +1622,7 @@
     const collectSettings = () => ({
       output_dir: $("#cfgOutDir").value.trim(),
       container: $("#cfgCont").value,
+      default_segment_minutes: Math.max(0, Number($("#cfgDefSeg")?.value) || 0),
       check_interval_sec: Math.max(10, Number($("#cfgInterval").value) || 30),
       vod_concurrent_fragments: Math.max(1, Number($("#cfgVodFrag").value) || 4),
       min_free_gb: Math.max(1, Number($("#cfgMinGb").value) || 15),
@@ -1586,6 +1674,7 @@
     $("#cfgTheme").onchange = (e) => { applyTheme(e.target.value); };
     $("#btnExportProf").onclick = () => callBackend("exportProfileZip");
     $("#btnImportProf").onclick = () => callBackend("importProfileZip");
+    $("#btnOpenClSettings")?.addEventListener("click", openChangelogModal);
     $("#btnPickCloudDir")?.addEventListener("click", async () => {
       const folder = await callBackend("pickFolder");
       if (folder && $("#cfgCloudPath")) {
@@ -2176,37 +2265,67 @@
     $("#chDrawerTitle").textContent = `Настройки канала — ${ch.username}`;
     const body = $("#chDrawerBody");
     const days = new Set(ch.schedule_days || [0, 1, 2, 3, 4, 5, 6]);
+    const curSeg = Number(ch.segment_minutes || 0);
     body.innerHTML = `
+      <div class="field">
+        <label>Разбивка записи на части (по длительности)</label>
+        <div class="split-pills" id="cdSegPills">
+          ${SPLIT_PRESETS.map((p) => `<button type="button" class="split-pill ${curSeg === p.val ? "active" : ""}" data-min="${p.val}">${p.label}</button>`).join("")}
+        </div>
+        <div class="input-row" style="margin-top:8px;">
+          <span style="font-size:12px;color:var(--text-muted);">Свой интервал (минут, 0 = одним файлом):</span>
+          <input type="number" class="input mono" style="width:92px;" id="cdSeg" value="${curSeg}" min="0" max="720"/>
+        </div>
+      </div>
+
       <div>
         <div class="setting-row"><div><div class="setting-row-title">Авто-переподключение при обрыве</div><div class="setting-row-desc">Мгновенно возобновит запись при падении стрима</div></div><label class="switch-inline"><input type="checkbox" id="cdReconn" ${ch.auto_reconnect ? "checked" : ""}/><span class="switch-track"></span></label></div>
-        <div class="setting-row"><div><div class="setting-row-title">Авто-склейка частей после обрыва</div><div class="setting-row-desc">Склеит все куски стрима в один целый файл</div></div><label class="switch-inline"><input type="checkbox" id="cdConcat" ${ch.auto_concat_parts ? "checked" : ""}/><span class="switch-track"></span></label></div>
         <div class="setting-row"><div><div class="setting-row-title">Параллельная запись чата Twitch</div><div class="setting-row-desc">Создаёт .chat.json и .chat.ass для хайлайтов</div></div><label class="switch-inline"><input type="checkbox" id="cdChat" ${ch.record_chat ? "checked" : ""}/><span class="switch-track"></span></label></div>
         <div class="setting-row"><div><div class="setting-row-title">Пропуск рекламы Twitch</div><div class="setting-row-desc">Флаг --twitch-disable-ads</div></div><label class="switch-inline"><input type="checkbox" id="cdAds" ${ch.disable_ads ? "checked" : ""}/><span class="switch-track"></span></label></div>
-        <div class="setting-row"><div><div class="setting-row-title">Сохранять исходник после блюра</div><div class="setting-row-desc">Не удалять _raw файл после постобработки</div></div><label class="switch-inline"><input type="checkbox" id="cdKeep" ${ch.keep_original ? "checked" : ""}/><span class="switch-track"></span></label></div>
-        <div class="setting-row"><div><div class="setting-row-title">Авто-сцена блюра по названию игры</div><div class="setting-row-desc">Автоматически переключает сцену блюра, если название совпадает с игрой на стриме</div></div><label class="switch-inline"><input type="checkbox" id="cdAutoScene" ${ch.auto_scene_by_game !== false ? "checked" : ""}/><span class="switch-track"></span></label></div>
-        <div class="setting-row"><div><div class="setting-row-title">Сохранять отдельную MP3-дорожку (подкаст)</div><div class="setting-row-desc">Авто-извлечение чистого аудио .mp3 сразу после записи</div></div><label class="switch-inline"><input type="checkbox" id="cdSepAudio" ${ch.separate_audio_track ? "checked" : ""}/><span class="switch-track"></span></label></div>
-        <div class="setting-row">
-          <div><div class="setting-row-title">Авто-клиппер 45с при взрыве чата (Hype Spike)</div><div class="setting-row-desc">Автоматически вырезает последние 45 сек в AutoClips/, когда чат превышает порог сообщ./10с</div></div>
-          <div class="input-row">
-            <input type="number" class="input" style="width:74px;" id="cdClipThr" value="${ch.auto_clip_threshold || 18}" min="5" max="200" title="Сообщений за 10 сек"/>
-            <label class="switch-inline"><input type="checkbox" id="cdAutoClip" ${ch.live_auto_clip ? "checked" : ""}/><span class="switch-track"></span></label>
+        <div class="setting-row"><div><div class="setting-row-title">Авто-сцена блюра по названию игры</div><div class="setting-row-desc">Автоматически переключает сцену блюра под текущую игру</div></div><label class="switch-inline"><input type="checkbox" id="cdAutoScene" ${ch.auto_scene_by_game !== false ? "checked" : ""}/><span class="switch-track"></span></label></div>
+      </div>
+
+      <details class="adv-group">
+        <summary>Авто-клиппер, MP3-подкаст и доп. опции</summary>
+        <div class="adv-body">
+          <div class="setting-row"><div><div class="setting-row-title">Авто-склейка частей после обрыва</div><div class="setting-row-desc">Склеит куски в 1 файл (если разбивка выключена)</div></div><label class="switch-inline"><input type="checkbox" id="cdConcat" ${ch.auto_concat_parts ? "checked" : ""}/><span class="switch-track"></span></label></div>
+          <div class="setting-row"><div><div class="setting-row-title">Сохранять исходник после блюра</div><div class="setting-row-desc">Не удалять _raw файл после постобработки</div></div><label class="switch-inline"><input type="checkbox" id="cdKeep" ${ch.keep_original ? "checked" : ""}/><span class="switch-track"></span></label></div>
+          <div class="setting-row"><div><div class="setting-row-title">Отдельная MP3-дорожка (подкаст)</div><div class="setting-row-desc">Авто-извлечение чистого аудио .mp3 после записи</div></div><label class="switch-inline"><input type="checkbox" id="cdSepAudio" ${ch.separate_audio_track ? "checked" : ""}/><span class="switch-track"></span></label></div>
+          <div class="setting-row">
+            <div><div class="setting-row-title">Авто-клиппер 45с при взрыве чата</div><div class="setting-row-desc">Вырезает 45 сек в AutoClips/ при пороге сообщ./10с</div></div>
+            <div class="input-row">
+              <input type="number" class="input" style="width:70px;" id="cdClipThr" value="${ch.auto_clip_threshold || 18}" min="5" max="200"/>
+              <label class="switch-inline"><input type="checkbox" id="cdAutoClip" ${ch.live_auto_clip ? "checked" : ""}/><span class="switch-track"></span></label>
+            </div>
+          </div>
+          <div class="field" style="margin-top:8px;"><label>Ключевые слова в чате для авто-маркера</label><input class="input" id="cdTrigWords" value="${esc(ch.chat_trigger_words || "")}" placeholder="КЛАТЧ, ОРУ, ЭЙС, КЛИП"/></div>
+        </div>
+      </details>
+
+      <details class="adv-group" ${ch.schedule_enabled || ch.category_filter || ch.title_filter ? "open" : ""}>
+        <summary>Фильтры игр и Расписание записи</summary>
+        <div class="adv-body" style="padding-top:10px;display:flex;flex-direction:column;gap:10px;">
+          <div class="field"><label>Фильтр категорий / игр (пусто = все)</label><input class="input" id="cdCat" value="${esc(ch.category_filter || "")}" placeholder="Just Chatting, Counter-Strike 2"/></div>
+          <div class="field"><label>Обязательные слова в названии стрима</label><input class="input" id="cdTitle" value="${esc(ch.title_filter || "")}" placeholder="турнир, марафон"/></div>
+          <div>
+            <div class="setting-row"><div><div class="setting-row-title">Запись по расписанию</div><div class="setting-row-desc">Автостарт только в выбранные дни и часы</div></div><label class="switch-inline"><input type="checkbox" id="cdSched" ${ch.schedule_enabled ? "checked" : ""}/><span class="switch-track"></span></label></div>
+            <div class="input-row" style="margin:10px 0;">
+              <input class="input mono" id="cdSStart" value="${esc(ch.schedule_start || "18:00")}"/><span>—</span><input class="input mono" id="cdSEnd" value="${esc(ch.schedule_end || "03:00")}"/>
+            </div>
+            <div class="day-pills" id="cdDays">
+              ${DAYS.map((d, i) => `<button type="button" class="day-pill ${days.has(i) ? "active" : ""}" data-day="${i}">${d}</button>`).join("")}
+            </div>
           </div>
         </div>
-        <div class="setting-row"><div><div class="setting-row-title">Разбивка по частям (минут)</div><div class="setting-row-desc">0 = одним непрерывным файлом</div></div><input type="number" class="input" style="width:95px;" id="cdSeg" value="${ch.segment_minutes || 0}" min="0" max="720"/></div>
-      </div>
-      <div class="field"><label>Ключевые слова в чате для авто-маркера хайлайта (через запятую)</label><input class="input" id="cdTrigWords" value="${esc(ch.chat_trigger_words || "")}" placeholder="КЛАТЧ, ОРУ, ЭЙС, CLIP, КЛИП"/></div>
-      <div class="field"><label>Фильтр категорий / игр (через запятую, пусто = все)</label><input class="input" id="cdCat" value="${esc(ch.category_filter || "")}" placeholder="Just Chatting, Counter-Strike 2"/></div>
-      <div class="field"><label>Обязательные слова в названии стрима</label><input class="input" id="cdTitle" value="${esc(ch.title_filter || "")}" placeholder="турнир, марафон"/></div>
-      <div>
-        <div class="setting-row"><div><div class="setting-row-title">Запись по расписанию</div><div class="setting-row-desc">Автостарт только в выбранные дни и часы</div></div><label class="switch-inline"><input type="checkbox" id="cdSched" ${ch.schedule_enabled ? "checked" : ""}/><span class="switch-track"></span></label></div>
-        <div class="input-row" style="margin:10px 0;">
-          <input class="input mono" id="cdSStart" value="${esc(ch.schedule_start || "18:00")}"/><span>—</span><input class="input mono" id="cdSEnd" value="${esc(ch.schedule_end || "03:00")}"/>
-        </div>
-        <div class="day-pills" id="cdDays">
-          ${DAYS.map((d, i) => `<button type="button" class="day-pill ${days.has(i) ? "active" : ""}" data-day="${i}">${d}</button>`).join("")}
-        </div>
-      </div>
+      </details>
     `;
+    body.querySelectorAll("#cdSegPills .split-pill").forEach((b) => {
+      b.onclick = () => {
+        body.querySelectorAll("#cdSegPills .split-pill").forEach((x) => x.classList.remove("active"));
+        b.classList.add("active");
+        $("#cdSeg").value = b.dataset.min;
+      };
+    });
     body.querySelectorAll(".day-pill").forEach((b) => { b.onclick = () => b.classList.toggle("active"); });
     $("#chDrawer").classList.remove("hidden");
   }
@@ -2251,22 +2370,54 @@
     };
   }
 
-  // ==================== LIGHTBOX PLAYER & COMMAND PALETTE ====================
+  // ==================== LIGHTBOX PLAYER & CHANGELOG ====================
+  let _lastLivePlayerCh = null;
+
   function openLiveStreamPlayer(ch) {
-    $("#playerTitle").textContent = `🔴 Прямой эфир (без рекламы) — ${ch.username} · ${ch.game || ch.platform.toUpperCase()}`;
+    _lastLivePlayerCh = ch;
+    $("#playerTitle").textContent = `🔴 Прямой эфир (без рекламы) — ${ch.username} · ${ch.status?.game || ch.platform.toUpperCase()}`;
     const v = $("#lightboxVideo");
-    v.src = `/media/stream?url=${encodeURIComponent(ch.stream_url)}&q=${encodeURIComponent(ch.quality || "720p60")}&t=${Date.now()}`;
+    const ov = $("#playerOverlay");
+    const sp = $("#playerSpinner");
+    const txt = $("#playerOverlayText");
+    const retryBtn = $("#btnPlayerRetry");
+
+    ov.classList.remove("hidden");
+    sp.classList.remove("hidden");
+    retryBtn.classList.add("hidden");
+    txt.textContent = `Подключение к потоку ${ch.username} (H.264 без рекламы)...`;
+
+    v.onplaying = () => { ov.classList.add("hidden"); };
+    v.oncanplay = () => { ov.classList.add("hidden"); v.play().catch(() => {}); };
+    v.onerror = () => {
+      if ($("#playerModal").classList.contains("hidden")) return;
+      sp.classList.add("hidden");
+      txt.textContent = "Не удалось запустить поток. Возможно, канал оффлайн или Twitch временно ограничил доступ.";
+      retryBtn.classList.remove("hidden");
+    };
+    retryBtn.onclick = () => { if (_lastLivePlayerCh) openLiveStreamPlayer(_lastLivePlayerCh); };
+
+    const q = ch.quality && ch.quality !== "1440p60" ? ch.quality : "720p60";
+    v.src = `/media/stream?url=${encodeURIComponent(ch.stream_url)}&q=${encodeURIComponent(q)}&t=${Date.now()}`;
+    v.load();
+    v.play().catch(() => {});
+
     const row = $("#playerMarkersRow");
     if (row) {
-      row.innerHTML = `<span style="color:var(--green);font-weight:600;">⚡ Прямой поток через Streamlink (без рекламы Twitch)</span>`
-        + `<span style="margin-left:auto;">Если поток буферизуется, подождите 2–3 сек</span>`;
+      row.innerHTML = `<span style="color:var(--success);font-weight:600;">⚡ Прямой поток через Streamlink H.264 (без рекламы Twitch)</span>`
+        + `<span style="margin-left:auto;">Буферизация занимает 2–4 сек</span>`;
     }
     $("#playerModal").classList.remove("hidden");
   }
 
   function openLightboxPlayer(path, name, markers = []) {
+    _lastLivePlayerCh = null;
+    $("#playerOverlay")?.classList.add("hidden");
     $("#playerTitle").textContent = name || path;
     const v = $("#lightboxVideo");
+    v.onplaying = null;
+    v.oncanplay = null;
+    v.onerror = null;
     v.src = mediaUrl(path);
     const row = $("#playerMarkersRow");
     if (row) {
@@ -2280,6 +2431,42 @@
       });
     }
     $("#playerModal").classList.remove("hidden");
+  }
+
+  async function openChangelogModal() {
+    const body = $("#changelogBody");
+    body.innerHTML = `<div style="color:var(--text-muted);padding:16px;">Загрузка истории изменений...</div>`;
+    $("#changelogModal").classList.remove("hidden");
+    const md = (await callBackend("getChangelog")) || "";
+    const sections = md.split(/^##\s+/m).slice(1);
+    if (!sections.length) {
+      body.innerHTML = `<div class="cl-version-card"><pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;">${esc(md)}</pre></div>`;
+      return;
+    }
+    const fmtInline = (line) => esc(line).replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/`([^`]+)`/g, "<kbd>$1</kbd>");
+    body.innerHTML = sections.map((sec, idx) => {
+      const lines = sec.trim().split("\n");
+      const head = lines[0] || "";
+      const [verPart, ...rest] = head.split("—");
+      const ver = (verPart || "").trim();
+      const title = rest.join("—").trim();
+      let html = `<div class="cl-version-card ${idx === 0 ? "latest" : ""}"><div class="cl-ver-head"><span class="cl-ver-badge">${esc(ver)}</span><span class="cl-ver-title">${esc(title)}</span></div>`;
+      let inList = false;
+      for (let i = 1; i < lines.length; i++) {
+        const l = lines[i].trim();
+        if (!l || l === "---") continue;
+        if (l.startsWith("### ")) {
+          if (inList) { html += "</ul>"; inList = false; }
+          html += `<div class="cl-sec-title">${esc(l.slice(4))}</div>`;
+        } else if (l.startsWith("- ")) {
+          if (!inList) { html += '<ul class="cl-list">'; inList = true; }
+          html += `<li>${fmtInline(l.slice(2))}</li>`;
+        }
+      }
+      if (inList) html += "</ul>";
+      html += "</div>";
+      return html;
+    }).join("");
   }
 
   function openCmdPalette() {
@@ -2367,6 +2554,8 @@
     if (gpuLbl) gpuLbl.textContent = encLabels[enc] || `Кодек: ${enc}`;
     const kbd = $("#cmdShortcutKbd");
     if (kbd) kbd.textContent = state.diagnostics.platform === "darwin" ? "⌘ K" : "Ctrl K";
+    const bv = $("#brandVerText");
+    if (bv) bv.textContent = `v${state.diagnostics.app_version || "2.4.0"} · Что нового`;
   }
 
   // ==================== BACKEND EVENT DISPATCHER ====================
@@ -2517,13 +2706,20 @@
     document.querySelectorAll(".nav-item").forEach((b) => { b.onclick = () => switchPage(b.dataset.page); });
     $("#btnOpenFolder").onclick = () => callBackend("openInExplorer", "");
     $("#btnOpenCmd").onclick = openCmdPalette;
+    $("#btnOpenChangelog")?.addEventListener("click", openChangelogModal);
+    $("#changelogClose")?.addEventListener("click", () => $("#changelogModal").classList.add("hidden"));
+    $("#changelogModal")?.addEventListener("click", (e) => { if (e.target.id === "changelogModal") $("#changelogModal").classList.add("hidden"); });
     $("#cmdInput").oninput = (e) => renderCmdResults(e.target.value);
     $("#cmdModal").onclick = (e) => { if (e.target.id === "cmdModal") $("#cmdModal").classList.add("hidden"); };
     const closeLightboxPlayer = () => {
       const v = $("#lightboxVideo");
+      v.onplaying = null;
+      v.oncanplay = null;
+      v.onerror = null;
       v.pause();
       v.removeAttribute("src");
       v.load();
+      $("#playerOverlay")?.classList.add("hidden");
       $("#playerModal").classList.add("hidden");
     };
     $("#playerClose").onclick = closeLightboxPlayer;
@@ -2534,6 +2730,7 @@
       if (e.key === "Escape") {
         $("#cmdModal").classList.add("hidden");
         $("#chDrawer").classList.add("hidden");
+        $("#changelogModal")?.classList.add("hidden");
         if (!$("#playerModal").classList.contains("hidden")) closeLightboxPlayer();
         return;
       }

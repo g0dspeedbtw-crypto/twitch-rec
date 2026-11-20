@@ -32,9 +32,11 @@ class LocalMediaServer:
         self,
         allowed_roots_fn: Callable[[], list[Path]],
         allowed_files_fn: Optional[Callable[[], set[Path]]] = None,
+        config_fn: Optional[Callable[[], object]] = None,
     ):
         self._allowed_roots_fn = allowed_roots_fn
         self._allowed_files_fn = allowed_files_fn
+        self._config_fn = config_fn
         self.live_previews: Dict[str, bytes] = {}
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -228,37 +230,87 @@ class LocalMediaServer:
                 if not sl_cmd or not ffmpeg:
                     self._send_bytes(503, "text/plain", b"Streamlink/FFmpeg unavailable")
                     return
-                sl_args = [*sl_cmd, "--stdout", "--quiet", "--twitch-disable-ads", stream_url, quality]
+
+                # Build safe H.264 fallback quality chain so Streamlink never fails if a specific preset is missing
+                raw_quals = [q.strip() for q in (quality or "").split(",") if q.strip()]
+                for fb in ("720p60", "720p", "1080p60", "1080p", "480p", "best"):
+                    if fb not in raw_quals:
+                        raw_quals.append(fb)
+                qual_chain = ",".join(raw_quals)
+
+                sl_args = [
+                    *sl_cmd,
+                    "--stdout",
+                    "--quiet",
+                    "--twitch-disable-ads",
+                    "--twitch-supported-codecs=h264",
+                ]
+                cfg = parent._config_fn() if parent._config_fn else None
+                if cfg is not None:
+                    oauth = getattr(cfg, "twitch_oauth_token", "") or ""
+                    if oauth and "twitch.tv" in stream_url.lower():
+                        sl_args.append(f"--twitch-api-header=Authorization=OAuth {oauth}")
+                    proxy = getattr(cfg, "proxy_url", "") or ""
+                    if proxy:
+                        sl_args.extend(["--http-proxy", proxy, "--https-proxy", proxy])
+                sl_args.extend([stream_url, qual_chain])
+
                 ff_args = [
                     ffmpeg, "-hide_banner", "-loglevel", "error",
-                    "-fflags", "+genpts+discardcorrupt", "-i", "pipe:0",
-                    "-c", "copy", "-f", "mp4",
-                    "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+                    "-fflags", "+genpts+discardcorrupt+nobuffer",
+                    "-i", "pipe:0",
+                    "-map", "0:v:0", "-map", "0:a:0?",
+                    "-c:v", "copy",
+                    "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+                    "-f", "mp4",
+                    "-movflags", "+frag_keyframe+empty_moov+default_base_moof+faststart",
                     "pipe:1",
                 ]
                 sl_proc = None
                 ff_proc = None
                 try:
                     sl_proc = subprocess.Popen(
-                        sl_args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW
+                        sl_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW
                     )
                     ff_proc = subprocess.Popen(
-                        ff_args, stdin=sl_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                        ff_args, stdin=sl_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         creationflags=CREATE_NO_WINDOW,
                     )
                     if sl_proc.stdout:
                         sl_proc.stdout.close()
+                    assert ff_proc.stdout is not None
+                    # Wait for first valid fragmented MP4 chunk before sending 200 OK
+                    first_chunk = ff_proc.stdout.read(32768)
+                    if not first_chunk:
+                        err_msg = b"Stream offline or failed to start"
+                        try:
+                            sl_err = sl_proc.stderr.read().decode("utf-8", errors="ignore").strip() if sl_proc.stderr else ""
+                            ff_err = ff_proc.stderr.read().decode("utf-8", errors="ignore").strip() if ff_proc.stderr else ""
+                            detail = (sl_err or ff_err)[:240]
+                            if detail:
+                                err_msg = detail.encode("utf-8", errors="ignore")
+                        except Exception:
+                            pass
+                        self._send_bytes(502, "text/plain; charset=utf-8", err_msg, "no-store")
+                        return
+
+                    self.close_connection = True
                     self.send_response(200)
                     self.send_header("Content-Type", "video/mp4")
                     self.send_header("Cache-Control", "no-store")
+                    self.send_header("Connection", "close")
                     self.end_headers()
-                    assert ff_proc.stdout is not None
+                    self.wfile.write(first_chunk)
+                    self.wfile.flush()
+
                     while True:
                         chunk = ff_proc.stdout.read(65536)
                         if not chunk:
                             break
                         self.wfile.write(chunk)
                         self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass
                 except Exception:
                     pass
                 finally:

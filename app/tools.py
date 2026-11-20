@@ -1154,6 +1154,43 @@ def merge_time_intervals(
 
 
 # ------------------------------------------------------------------ #25 Target Export Presets
+def split_video_by_duration(
+    input_path: str,
+    segment_minutes: int,
+    output_dir: Optional[str] = None,
+) -> Tuple[bool, List[str], str]:
+    """Losslessly split an existing video into N-minute parts using FFmpeg segment muxer."""
+    ffmpeg = get_ffmpeg_path()
+    if not ffmpeg:
+        return False, [], "FFmpeg не найден"
+    if not os.path.exists(input_path):
+        return False, [], "Файл не найден"
+    seg_sec = max(60, int(segment_minutes) * 60)
+    src = Path(input_path)
+    out_parent = Path(output_dir) if output_dir else (src.parent / f"{src.stem}_parts_{segment_minutes}m")
+    out_parent.mkdir(parents=True, exist_ok=True)
+    ext = src.suffix.lower() if src.suffix else ".mp4"
+    pattern = str(out_parent / f"{src.stem}_part%03d{ext}")
+    cmd = [
+        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", input_path,
+        "-c", "copy", "-map", "0",
+        "-f", "segment", "-segment_time", str(seg_sec),
+        "-reset_timestamps", "1",
+    ]
+    if ext == ".mp4":
+        cmd.extend(["-segment_format_options", "movflags=+faststart"])
+    cmd.append(pattern)
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, creationflags=CREATE_NO_WINDOW)
+        parts = sorted(str(p) for p in out_parent.glob(f"{src.stem}_part*{ext}") if p.exists() and p.stat().st_size > 1024)
+        if res.returncode == 0 and parts:
+            return True, parts, str(out_parent)
+        return False, parts, (res.stderr or "Не удалось разбить файл").strip()
+    except Exception as exc:
+        return False, [], str(exc)
+
+
 EXPORT_PRESETS = {
     "youtube_1080p60": {"label": "YouTube 1080p60 (высокое качество)", "max_mb": None, "height": 1080, "fps": 60, "cq": 19, "audio_kbps": 192},
     "telegram_50mb": {"label": "Telegram — до 50 МБ", "max_mb": 48, "height": 720, "fps": 30, "cq": 25, "audio_kbps": 128},

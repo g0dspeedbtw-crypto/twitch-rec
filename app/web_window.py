@@ -62,6 +62,7 @@ class StudioDesktopWindow(QMainWindow):
         self.media_server = LocalMediaServer(
             allowed_roots_fn=lambda: self.bridge.get_allowed_media_roots() if hasattr(self, "bridge") else [],
             allowed_files_fn=lambda: self.bridge.get_allowed_media_files() if hasattr(self, "bridge") else set(),
+            config_fn=lambda: self.bridge.config if hasattr(self, "bridge") else None,
         )
         port = self.media_server.start()
 

@@ -104,10 +104,30 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_tag != ''
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
+      - name: Extract Release Notes from CHANGELOG.md
+        run: |
+          TAG="${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref_name }}"
+          python3 - "$TAG" <<'PY'
+          import re, sys
+          from pathlib import Path
+          tag = sys.argv[1].lstrip("v")
+          cl = Path("CHANGELOG.md")
+          notes = ""
+          if cl.exists():
+              text = cl.read_text(encoding="utf-8")
+              m = re.search(rf"^##\s+v?{re.escape(tag)}\b.*?(?=^##\s+|\Z)", text, re.MULTILINE | re.DOTALL)
+              if m:
+                  notes = m.group(0).strip()
+          if not notes:
+              notes = f"## Twitch Recorder Pro v{tag}\n\nСборки для Windows и macOS прикреплены ниже."
+          Path("release_notes.md").write_text(notes + "\n", encoding="utf-8")
+          print(notes)
+          PY
       - name: Generate SHA256SUMS.txt
         run: |
           cd release-assets
@@ -118,7 +138,7 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref_name }}
           name: "Twitch Recorder Pro ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref_name }}"
-          generate_release_notes: true
+          body_path: release_notes.md
           files: |
             release-assets/TwitchRecorderPro-Windows.zip
             release-assets/TwitchRecorderPro-macOS.dmg

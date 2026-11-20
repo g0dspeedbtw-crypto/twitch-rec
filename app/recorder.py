@@ -445,10 +445,15 @@ class LiveRecorderWorker(QThread):
 
         if self.channel.segment_minutes > 0:
             seg_sec = self.channel.segment_minutes * 60
+            if not use_realtime_blur and ext == "mp4":
+                ff_cmd.extend(["-bsf:a", "aac_adtstoasc"])
             ff_cmd.extend([
                 "-f", "segment", "-segment_time", str(seg_sec),
                 "-reset_timestamps", "1", "-strftime", "0",
             ])
+            if ext == "mp4":
+                ff_cmd.extend(["-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof"])
+            self.log_message.emit(f"[{uname}] Авто-разбивка записи: по {self.channel.segment_minutes} мин.")
         elif ext == "mp4":
             ff_cmd.extend(["-movflags", "+frag_keyframe+empty_moov+default_base_moof"])
 
@@ -1590,6 +1595,19 @@ class StudioToolWorker(QThread):
                     self._emit_done(False, "Отменено", "")
                     return
                 self._emit_done(rc == 0 and os.path.exists(out), out if rc == 0 else err, "Экспорт готов")
+
+            elif self.action == "split_parts":
+                from app.tools import split_video_by_duration
+                inp = self.params["input_path"]
+                seg_min = max(1, int(self.params.get("segment_minutes", 30)))
+                self.progress_updated.emit(self.job_id, 20.0, f"Разбивка без перекодирования по {seg_min} мин...")
+                ok, parts, info = split_video_by_duration(inp, seg_min)
+                if ok and parts:
+                    self.progress_updated.emit(self.job_id, 100.0, f"Готово: {len(parts)} частей по {seg_min} мин")
+                    self.log_message.emit(f"[Студия] Видео разбито на {len(parts)} частей в {info}")
+                    self.finished_task.emit(self.job_id, parts[0], True)
+                else:
+                    self._emit_done(False, info, "")
 
         except Exception as exc:
             self._emit_done(False, str(exc), "")
