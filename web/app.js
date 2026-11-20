@@ -31,6 +31,13 @@
     vodDraftRegions: [],
     studioFile: "",
     studioChatFile: "",
+    studioMeta: null,
+    studioIn: 0,
+    studioOut: 60,
+    studioTime: 0,
+    studioSpeed: 1,
+    studioFx: { speed: 1, color_preset: "none", brightness: 0, contrast: 1, saturation: 1, sharpen: false, fade_in: 0, fade_out: 0, volume_db: 0, denoise: false, voice_enhance: false, normalize_audio: false },
+    studioThumb: { headline: "ЛУЧШИЙ МОМЕНТ СТРИМА", subtitle: "TWITCH HIGHLIGHTS", accent: "#8b5cf6" },
     shortsCam: null,
     shortsGame: null,
     libSearch: "",
@@ -772,553 +779,844 @@
     bindJobEvents(root);
   }
 
-  // ==================== PAGE 5: STUDIO & AI ====================
-  function renderStudioPage() {
+  // ==================== PAGE 5: PRO STUDIO 3.0 NLE WORKSPACE ====================
+  let _studioLoadedSrc = "";
+  let _studioProbedFile = "";
+
+  async function loadStudioVideo(path) {
+    if (!path) return;
+    state.studioFile = path;
+    state.studioTime = 0;
+    state.studioMeta = null;
+    state.multiCutSegments = [];
+    renderStudioPage();
+    _studioProbedFile = path;
+    const raw = await callBackend("probeStudioVideo", path);
+    if (_studioProbedFile !== path) return;
+    try {
+      const m = JSON.parse(raw || "{}");
+      if (m.ok) {
+        state.studioMeta = m;
+        state.studioIn = 0;
+        state.studioOut = m.duration > 0 ? Math.min(m.duration, Math.max(10, m.duration)) : 60;
+        if (m.chat_path) state.studioChatFile = m.chat_path;
+        if (state.page === "studio") renderStudioPage(true);
+      }
+    } catch {}
+  }
+
+  function studioFxCssFilter() {
+    const fx = state.studioFx;
+    let b = 1 + (Number(fx.brightness) || 0);
+    let c = Number(fx.contrast) || 1;
+    let s = Number(fx.saturation) || 1;
+    if (fx.color_preset === "vibrant") { b += 0.03; c *= 1.08; s *= 1.24; }
+    else if (fx.color_preset === "cinema") { b -= 0.03; c *= 1.14; s *= 0.88; }
+    else if (fx.color_preset === "crisp") { c *= 1.10; s *= 1.10; }
+    return `brightness(${b.toFixed(2)}) contrast(${c.toFixed(2)}) saturate(${s.toFixed(2)})`;
+  }
+
+  function renderStudioPage(forceRebuild = false) {
     const root = $("#page-studio");
     const stJobs = Object.values(state.jobs).filter((j) => j.category === "studio").reverse();
-    const chPresets = state.channels.filter((c) => (c.blur_regions || []).length > 0);
     const hasVid = !!state.studioFile;
 
-    root.innerHTML = `
-      <div class="page-header">
-        <div>
-          <div class="page-title">Монтаж и AI-студия</div>
-          <div class="page-sub">Интерактивный триммер, Shorts 9:16, тепловая карта чата/звука, Whisper субтитры, авто-цензура и экспорт</div>
-        </div>
-      </div>
+    if (hasVid && _studioProbedFile !== state.studioFile) {
+      loadStudioVideo(state.studioFile);
+      return;
+    }
 
-      <div class="subnav" id="studioSubnav">
-        <button data-sub="trim" class="${state.studioSub === "trim" ? "active" : ""}">Обрезка / Склейка / AFK</button>
-        <button data-sub="shorts" class="${state.studioSub === "shorts" ? "active" : ""}">Shorts / TikTok 9:16</button>
-        <button data-sub="highlights" class="${state.studioSub === "highlights" ? "active" : ""}">Хайлайты и Чат</button>
-        <button data-sub="ai" class="${state.studioSub === "ai" ? "active" : ""}">AI Субтитры и Конспект</button>
-        <button data-sub="thumbnail" class="${state.studioSub === "thumbnail" ? "active" : ""}">Обложка YouTube</button>
-        <button data-sub="export" class="${state.studioSub === "export" ? "active" : ""}">Экспорт и Звук</button>
-      </div>
+    const existingMon = $("#studioMonitor");
+    if (!forceRebuild && hasVid && existingMon && _studioLoadedSrc === state.studioFile && $("#studioInspectorHost")) {
+      updateStudioToolTabsUI();
+      renderStudioInspector();
+      syncStudioMonitorOverlays();
+      renderStudioTimelineUI();
+      renderStudioJobsDock(stJobs);
+      return;
+    }
 
-      <div class="card" style="margin-bottom:14px;">
-        <div class="input-row">
-          <input class="input" id="stFileInp" value="${esc(state.studioFile)}" placeholder="Выберите видеофайл для работы в студии..." />
-          <button class="btn btn-subtle" id="btnStPick">${iconSvg("folder", 15)}<span>Выбрать видео</span></button>
-        </div>
-      </div>
-
-      ${state.studioSub === "trim" ? `
-        <div class="card">
-          ${hasVid ? `<video class="studio-video-preview" id="trimVideo" controls src="${mediaUrl(state.studioFile)}"></video>` : ""}
-          <div class="input-row" style="flex-wrap:wrap;margin-bottom:10px;">
-            <div class="field" style="width:125px;"><label>Начало (I)</label><input class="input mono" id="trimStart" value="00:00:00" /></div>
-            <div class="field" style="width:125px;"><label>Конец (O)</label><input class="input mono" id="trimEnd" value="00:01:00" /></div>
-            ${hasVid ? `
-              <button class="btn btn-subtle btn-sm" id="btnMarkIn" title="Клавиша I">От (I)</button>
-              <button class="btn btn-subtle btn-sm" id="btnMarkOut" title="Клавиша O">До (O)</button>
-            ` : ""}
-            <button class="btn btn-soft btn-sm" id="btnAddCutSeg">${iconSvg("plus", 13)}<span>В нарезку</span></button>
-            <label class="switch-inline"><input type="checkbox" id="trimAcc" checked/><span class="switch-track"></span><span>Точный кадр</span></label>
-            <div style="flex:1"></div>
-            <button class="btn btn-soft" id="btnRemoveAfk">${iconSvg("sparkles", 15)}<span>Удалить тишину/AFK</span></button>
-            <button class="btn btn-primary" id="btnDoTrim">${iconSvg("scissors", 15)}<span>Обрезать</span></button>
+    if (!hasVid) {
+      _studioLoadedSrc = "";
+      if (!state.library.length) callBackend("scanLibrary");
+      const recent = state.library.slice(0, 6);
+      root.innerHTML = `
+        <div class="page-header">
+          <div>
+            <div class="page-title">Монтаж и AI-студия</div>
+            <div class="page-sub">Полноценная NLE-студия: интерактивный таймлайн, Shorts 9:16, хайлайты, цветокор, Whisper AI и обложки</div>
           </div>
-          ${hasVid ? `<div style="font-size:11.5px;color:var(--text-muted);margin-bottom:8px;">Хоткеи плеера: <kbd>Space</kbd> пауза · <kbd>I</kbd> начало · <kbd>O</kbd> конец · <kbd>J</kbd>/<kbd>L</kbd> ±10с · <kbd>←</kbd>/<kbd>→</kbd> ±5с</div>` : ""}
-          ${state.multiCutSegments.length > 0 ? `
-            <div style="border-top:1px solid var(--border);padding-top:10px;margin-bottom:12px;">
-              <div class="input-row" style="justify-content:space-between;flex-wrap:wrap;">
-                <span style="font-size:12.5px;font-weight:600;">Отрезки Multi-Cut нарезки (${state.multiCutSegments.length})</span>
-                <div class="input-row">
-                  <button class="btn btn-danger-ghost btn-sm" id="btnClearMultiCut">Очистить</button>
-                  <button class="btn btn-success btn-sm" id="btnRunMultiCut">${iconSvg("film", 13)}<span>Собрать нарезку (${state.multiCutSegments.length})</span></button>
+          <div class="header-actions">
+            <button class="btn btn-primary" id="btnStPick">${iconSvg("folder", 15)}<span>Открыть видео</span></button>
+          </div>
+        </div>
+
+        <div class="studio-dropzone" id="stDropzone">
+          <div class="studio-file-icon" style="width:52px;height:52px;border-radius:14px;">${iconSvg("scissors", 24)}</div>
+          <h3>Откройте запись или перетащите видео сюда</h3>
+          <p>Поддерживаются MP4, MKV, TS и MOV. Внутри доступен живой монитор, интерактивный таймлайн с маркерами, Shorts 9:16, Whisper AI, цветокор и экспорт.</p>
+          <div class="input-row" style="margin-top:6px;">
+            <button class="btn btn-primary" id="btnStPickBig">${iconSvg("folder", 15)}<span>Выбрать файл на диске</span></button>
+            <button class="btn btn-subtle" id="btnStGoLib">${iconSvg("grid", 15)}<span>Открыть Библиотеку</span></button>
+          </div>
+        </div>
+
+        ${recent.length ? `
+          <div class="section-heading"><span>Последние записи — открыть в 1 клик</span></div>
+          <div class="studio-recent-grid">
+            ${recent.map((it) => `
+              <div class="studio-recent-card" data-open-path="${esc(it.path)}">
+                <div class="studio-recent-thumb">
+                  <img src="${thumbUrl(it.path)}" alt="" loading="lazy" />
+                  ${it.duration ? `<span class="media-dur">${fmtDur(it.duration)}</span>` : ""}
                 </div>
-              </div>
-              <div class="multicut-list">
-                ${state.multiCutSegments.map((seg, i) => `
-                  <span class="multicut-chip">#${i + 1} ${fmtDur(seg[0])}–${fmtDur(seg[1])} <button data-rm-seg="${i}" title="Удалить">×</button></span>
-                `).join("")}
-              </div>
-            </div>
-          ` : ""}
-          <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-            <div>
-              <div style="font-size:13px;font-weight:600;">Разбить видео на равные части (без перекодирования)</div>
-              <div style="font-size:11.5px;color:var(--text-muted);">Мгновенно нарежет длинный стрим или VOD на куски по 30 мин, 1 часу и т.д.</div>
-            </div>
-            <div style="flex:1"></div>
-            <div class="input-row" style="flex-wrap:wrap;">
-              <button class="split-pill st-split-preset" data-min="15">15 мин</button>
-              <button class="split-pill st-split-preset active" data-min="30">30 мин</button>
-              <button class="split-pill st-split-preset" data-min="60">1 час</button>
-              <button class="split-pill st-split-preset" data-min="120">2 часа</button>
-              <input type="number" class="input mono" id="stSplitMin" value="30" min="1" max="600" style="width:74px;" title="Минут в одной части" />
-              <button class="btn btn-primary btn-sm" id="btnSplitParts">${iconSvg("scissors", 14)}<span>Разбить</span></button>
-            </div>
-          </div>
-          <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-            <span style="color:var(--text-secondary);font-size:13px;">Склейка нескольких записей или клипов в один файл</span>
-            <label class="switch-inline"><input type="checkbox" id="catNorm"/><span class="switch-track"></span><span>Выровнять в 1080p60</span></label>
-            <div style="flex:1"></div>
-            <button class="btn btn-subtle" id="btnDoConcat">${iconSvg("plus", 15)}<span>Выбрать 2+ файлов и склеить</span></button>
-          </div>
-        </div>
-      ` : state.studioSub === "shorts" ? `
-        <div class="card">
-          <div class="form-grid-2" style="margin-bottom:14px;">
-            <div class="field">
-              <label>Шаблон компоновки 9:16 (1080×1920)</label>
-              <select class="input-select" id="shortsMode">
-                <option value="split">Вебка сверху + Геймплей снизу (с неоновой линией)</option>
-                <option value="pip_circle">Круглая вебка (PiP) поверх геймплея</option>
-                <option value="pip_rounded">Скруглённая вебка (PiP) поверх геймплея</option>
-                <option value="blur_bg">Видео по центру + размытый фон</option>
-              </select>
-            </div>
-            <div class="field">
-              <label>Пресет блюра баннера (опционально)</label>
-              <select class="input-select" id="shortsBlurCh">
-                <option value="">Без блюра</option>
-                ${chPresets.map((c) => `<option value="${esc(c.key)}">Канал ${esc(c.username)} (${c.blur_regions.length} зон)</option>`).join("")}
-              </select>
-            </div>
-          </div>
-          <div class="input-row" style="margin-bottom:14px;flex-wrap:wrap;">
-            <label class="switch-inline"><input type="checkbox" id="shortsProgBar" checked/><span class="switch-track"></span><span>Анимированный прогресс-бар снизу</span></label>
-            <label class="switch-inline"><input type="checkbox" id="shortsKillcam"/><span class="switch-track"></span><span>Killcam 1.35x зум на прицел/центр</span></label>
-          </div>
-          <div class="input-row" style="flex-wrap:wrap;">
-            <button class="btn btn-soft" id="btnPickShortsZones">${iconSvg("crop", 15)}<span>Выделить Вебку (1) и Геймплей (2) на видео</span></button>
-            <div style="flex:1"></div>
-            <button class="btn btn-primary" id="btnRunShorts">${iconSvg("smartphone", 15)}<span>Создать Shorts 9:16</span></button>
-          </div>
-        </div>
-      ` : state.studioSub === "highlights" ? `
-        <div class="card">
-          <div class="input-row" style="margin-bottom:10px;flex-wrap:wrap;">
-            <input class="input" style="flex:1;" id="hlChatInp" value="${esc(state.studioChatFile)}" placeholder="Файл чата (.chat.json — выбирается для тепловой карты чата)..." />
-            <button class="btn btn-subtle" id="btnPickChat">${iconSvg("folder", 15)}<span>Чат JSON</span></button>
-            <button class="btn btn-primary" id="btnScanChat">${iconSvg("flame", 15)}<span>Анализ чата</span></button>
-            <button class="btn btn-soft" id="btnScanAudio">${iconSvg("volume", 15)}<span>Громкие моменты</span></button>
-            <button class="btn btn-soft" id="btnScanEvents" title="Поиск смеха, криков и выстрелов (900–3800 Гц)">${iconSvg("sparkles", 15)}<span>Смех / Выстрелы</span></button>
-            <button class="btn btn-subtle" id="btnBurnChat">${iconSvg("video", 15)}<span>Вшить чат</span></button>
-          </div>
-          <div class="input-row" style="margin-bottom:12px;flex-wrap:wrap;">
-            <input class="input" style="flex:1;" id="hlVodUrl" placeholder="Скачать чат прошлого Twitch VOD (ссылка https://twitch.tv/videos/... или ID)..." />
-            <button class="btn btn-subtle btn-sm" id="btnFetchVodChat">${iconSvg("download", 14)}<span>Скачать чат VOD</span></button>
-            ${state.highlights.highlights.length > 0 ? `
-              <button class="btn btn-subtle btn-sm" id="btnExportEdl">${iconSvg("save", 14)}<span>Экспорт .EDL</span></button>
-              <button class="btn btn-soft btn-sm" id="btnBatchShortsHl" title="Авто-нарезка всех хайлайтов сразу в вертикальные Shorts 9:16">${iconSvg("smartphone", 14)}<span>Все в Shorts 9:16 (${state.highlights.highlights.length})</span></button>
-              <button class="btn btn-success btn-sm" id="btnBatchCutHl">${iconSvg("scissors", 14)}<span>Нарезать все (${state.highlights.highlights.length})</span></button>
-            ` : ""}
-          </div>
-          <div class="heatmap-box" id="heatmapBox">${renderHeatmapSvg()}</div>
-          <div class="hl-list" style="margin-top:12px;">
-            ${state.highlights.highlights.map((h) => `
-              <div class="hl-row">
-                <div><span class="mono" style="color:var(--accent-light);font-weight:700;">${fmtDur(h.timestamp_sec)}</span> &nbsp; ${esc(h.reason)}</div>
-                <button class="btn btn-success btn-sm act-cut-hl" data-ts="${h.timestamp_sec}">${iconSvg("scissors", 13)}<span>Вырезать ±20с</span></button>
+                <div class="studio-recent-info">
+                  <div class="studio-recent-name" title="${esc(it.name)}">${esc(it.name)}</div>
+                  <div class="studio-recent-sub">${esc(it.size_str || "")}${it.markers?.length ? ` · 🔖 ${it.markers.length}` : ""}</div>
+                </div>
               </div>
             `).join("")}
           </div>
-        </div>
-      ` : state.studioSub === "ai" ? `
-        <div class="card">
-          <div class="form-grid-4" style="margin-bottom:14px;">
-            <div class="field">
-              <label>Модель Whisper</label>
-              <select class="input-select" id="aiModel">
-                ${["tiny", "base", "small", "medium"].map((m) => `<option ${state.config.whisper_model === m ? "selected" : ""}>${m}</option>`).join("")}
-              </select>
-            </div>
-            <div class="field">
-              <label>Язык и Перевод</label>
-              <select class="input-select" id="aiLang">
-                <option value="ru">Русский (ru)</option>
-                <option value="en">English (en)</option>
-                <option value="translate_en">Перевод RU → EN субтитры</option>
-                <option value="auto">Авто</option>
-              </select>
-            </div>
-            <div class="field"><label>Караоке-субтитры</label><label class="switch-inline" style="margin-top:6px;"><input type="checkbox" id="aiBurn" checked/><span class="switch-track"></span><span>Вшить (Shorts Pop)</span></label></div>
-            <div class="field"><label>Цензура</label><label class="switch-inline" style="margin-top:6px;"><input type="checkbox" id="aiBeep" checked/><span class="switch-track"></span><span>Писк 1кГц</span></label></div>
-          </div>
-          <div class="form-grid-2" style="margin-bottom:12px;">
-            <div class="field">
-              <label>Запрещённые слова для авто-цензуры (через запятую)</label>
-              <input class="input" id="aiBanned" value="${esc(state.config.banned_words || "")}" />
-            </div>
-            <div class="field">
-              <label>Словарь Whisper (ники стримеров, игровой сленг)</label>
-              <input class="input" id="aiPrompt" value="${esc(state.config.whisper_prompt || "")}" placeholder="skywhywalker, клатч, эйс, мираж..." />
-            </div>
-          </div>
-          <div class="input-row" style="flex-wrap:wrap;">
-            <button class="btn btn-primary" id="btnAiSubs">${iconSvg("sparkles", 15)}<span>Караоке-субтитры Shorts</span></button>
-            <button class="btn btn-danger" id="btnAiCensor">${iconSvg("volume", 15)}<span>Запикать запрещённые слова</span></button>
-            <div style="flex:1"></div>
-            <button class="btn btn-subtle" id="btnGenDigest">${iconSvg("bookmark", 15)}<span>AI Конспект стрима</span></button>
-            <button class="btn btn-soft" id="btnGenYtMeta">${iconSvg("film", 15)}<span>AI Заголовки и Таймкоды YouTube</span></button>
-          </div>
-          ${state.streamDigest ? `
-            <div class="yt-meta-box">
-              <div class="input-row" style="justify-content:space-between;">
-                <span style="font-weight:700;font-size:13px;">AI Конспект / Саммари эфира</span>
-                <button class="btn btn-subtle btn-sm" id="btnCopyDigest">${iconSvg("copy", 13)}<span>Копировать конспект</span></button>
-              </div>
-              <textarea readonly style="min-height:130px;">${esc(state.streamDigest)}</textarea>
-            </div>
-          ` : ""}
-          ${state.ytMeta ? `
-            <div class="yt-meta-box">
-              <div class="input-row" style="justify-content:space-between;">
-                <span style="font-weight:700;font-size:13px;">YouTube SEO (${state.ytMeta.source === "llm" ? "LLM AI" : "Авто-шаблон"})</span>
-                <button class="btn btn-subtle btn-sm" id="btnCopyYtMeta">${iconSvg("copy", 13)}<span>Копировать всё</span></button>
-              </div>
-              <div class="field"><label>Варианты заголовков</label><textarea readonly>${esc((state.ytMeta.titles || []).join("\n"))}</textarea></div>
-              <div class="field"><label>Описание и таймкоды</label><textarea readonly>${esc(state.ytMeta.description || "")}</textarea></div>
-              <div class="field"><label>Теги</label><input class="input" readonly value="${esc(state.ytMeta.tags || "")}" /></div>
-            </div>
-          ` : ""}
-        </div>
-      ` : state.studioSub === "thumbnail" ? `
-        <div class="card">
-          <div class="form-grid-3" style="margin-bottom:12px;">
-            <div class="field">
-              <label>Крупный заголовок на обложке</label>
-              <input class="input" id="thHeadline" placeholder="ЛУЧШИЙ КЛАТЧ ГОДА!" />
-            </div>
-            <div class="field">
-              <label>Плашка-подзаголовок сверху</label>
-              <input class="input" id="thSubtitle" placeholder="SKYWHYWALKER · GTA VI" />
-            </div>
-            <div class="field">
-              <label>Таймкод кадра (сек) и Цвет акцента</label>
-              <div class="input-row">
-                <input type="number" class="input mono" id="thTimeSec" value="15" min="0" style="width:95px;" />
-                <select class="input-select" id="thAccent">
-                  <option value="#8B5CF6">Фиолетовый неон</option>
-                  <option value="#EF4444">Красный YouTube</option>
-                  <option value="#22C55E">Изумрудный</option>
-                  <option value="#3B82F6">Кибер-синий</option>
-                  <option value="#F59E0B">Золотой</option>
-                </select>
-              </div>
-            </div>
-          </div>
-          <div class="input-row" style="flex-wrap:wrap;">
-            <label class="switch-inline"><input type="checkbox" id="thBorder" checked/><span class="switch-track"></span><span>Неоновая рамка по контуру</span></label>
-            <div style="flex:1"></div>
-            <button class="btn btn-primary" id="btnCreateThumb">${iconSvg("camera", 15)}<span>Сгенерировать обложку 1280×720 (.JPG)</span></button>
-          </div>
-          ${state.lastThumbPath ? `
-            <div style="margin-top:14px;display:flex;flex-direction:column;gap:8px;align-items:flex-start;">
-              <img src="${mediaUrl(state.lastThumbPath)}&t=${Date.now()}" style="max-width:440px;border-radius:10px;border:1px solid var(--border);" alt="Thumbnail" />
-              <button class="btn btn-subtle btn-sm" id="btnRevealThumb">${iconSvg("folder", 14)}<span>Показать обложку в папке</span></button>
-            </div>
-          ` : ""}
-        </div>
-      ` : `
-        <div class="card">
-          <div class="form-grid-2" style="margin-bottom:12px;">
-            <div class="field">
-              <label>Пресет экспорта и сжатия</label>
-              <select class="input-select" id="expPreset">
-                ${Object.entries(state.exportPresets).map(([k, v]) => `<option value="${esc(k)}">${esc(v.label)}</option>`).join("")}
-              </select>
-            </div>
-            <div class="field">
-              <label>PNG Вотермарка канала (опционально, правый верхний угол)</label>
-              <div class="input-row">
-                <input class="input" id="expWmPath" value="${esc(state.config.watermark_path || "")}" placeholder="Без вотермарки" />
-                <button class="btn btn-subtle" id="btnPickWm">${iconSvg("image", 15)}</button>
-              </div>
-            </div>
-          </div>
-          <div class="input-row" style="flex-wrap:wrap;">
-            <label class="switch-inline"><input type="checkbox" id="expNorm" checked/><span class="switch-track"></span><span>Нормализация EBU R128</span></label>
-            <label class="switch-inline"><input type="checkbox" id="expVoice"/><span class="switch-track"></span><span>Усиление голоса (Compressor + Highpass)</span></label>
-            <div style="flex:1"></div>
-            <button class="btn btn-subtle" id="btnExtractMp3">${iconSvg("volume", 15)}<span>Извлечь .MP3 подкаст</span></button>
-            <button class="btn btn-soft" id="btnPubTgNow">${iconSvg("bell", 15)}<span>В Telegram</span></button>
-            <button class="btn btn-primary" id="btnDoExport">${iconSvg("download", 15)}<span>Экспортировать</span></button>
-          </div>
-        </div>
-      `}
+        ` : ""}
+        <div id="studioJobsDock"></div>
+      `;
+      const pickFn = async () => {
+        const p = await callBackend("pickFile", "Видео (*.mp4 *.mkv *.ts *.mov *.webm)");
+        if (p) loadStudioVideo(p);
+      };
+      $("#btnStPick").onclick = pickFn;
+      $("#btnStPickBig").onclick = pickFn;
+      $("#btnStGoLib").onclick = () => switchPage("library");
+      root.querySelectorAll(".studio-recent-card").forEach((c) => {
+        c.onclick = () => loadStudioVideo(c.dataset.openPath);
+      });
+      renderStudioJobsDock(stJobs);
+      return;
+    }
 
-      <div class="section-heading"><span>Задачи студии (${stJobs.length})</span></div>
-      ${stJobs.length ? `<div class="jobs-list">${stJobs.map(renderJobCard).join("")}</div>` : ""}
+    _studioLoadedSrc = state.studioFile;
+    const m = state.studioMeta || {};
+    const fname = state.studioFile.split(/[\\/]/).pop();
+
+    root.innerHTML = `
+      <div class="studio-topbar">
+        <div class="studio-file-meta">
+          <div class="studio-file-icon">${iconSvg("film", 18)}</div>
+          <div style="min-width:0;">
+            <div class="studio-file-name" title="${esc(state.studioFile)}">${esc(fname)}</div>
+            <div class="studio-meta-pills">
+              ${m.width ? `<span class="studio-meta-pill">${m.width}×${m.height}</span>` : ""}
+              ${m.fps ? `<span class="studio-meta-pill">${Math.round(m.fps)} FPS</span>` : ""}
+              ${m.duration ? `<span class="studio-meta-pill">${fmtDur(m.duration)}</span>` : ""}
+              ${m.size_str ? `<span class="studio-meta-pill">${esc(m.size_str)}</span>` : ""}
+              ${m.markers?.length ? `<span class="studio-meta-pill" style="color:#fbbf24;">🔖 ${m.markers.length} марк.</span>` : ""}
+            </div>
+          </div>
+        </div>
+        <div class="input-row" style="flex-wrap:wrap;">
+          <button class="btn btn-subtle btn-sm" id="btnStPick">${iconSvg("folder", 14)}<span>Другое видео</span></button>
+          <button class="btn btn-subtle btn-sm" id="btnStReveal">${iconSvg("grid", 14)}<span>В папке</span></button>
+          <button class="btn btn-danger-ghost btn-sm" id="btnStCloseFile">${iconSvg("x", 14)}<span>Закрыть</span></button>
+        </div>
+      </div>
+
+      <div class="studio-nle-grid">
+        <div class="studio-stage-col">
+          <div class="studio-monitor-card">
+            <div class="studio-monitor-screen">
+              <video id="studioMonitor" src="${mediaUrl(state.studioFile)}" playsinline preload="metadata"></video>
+              <div class="monitor-shorts-guide hidden" id="monShortsGuide"><span>SHORTS 9:16</span></div>
+              <div class="monitor-thumb-preview hidden" id="monThumbPreview">
+                <span class="monitor-thumb-pill" id="monThumbSub"></span>
+                <div class="monitor-thumb-head" id="monThumbHead"></div>
+              </div>
+            </div>
+            <div class="studio-transport">
+              <button class="btn btn-primary btn-sm" id="stBtnPlay" title="Пауза / Старт (Space)">${iconSvg("play", 14)}</button>
+              <button class="btn-icon" id="stBtnBack5" title="-5 сек (←)">-5с</button>
+              <button class="btn-icon" id="stBtnFrameB" title="-1 кадр">&lt;</button>
+              <button class="btn-icon" id="stBtnFrameF" title="+1 кадр">&gt;</button>
+              <button class="btn-icon" id="stBtnFwd5" title="+5 сек (→)">+5с</button>
+              <span class="transport-tc" id="stTimecode">00:00:00 / ${fmtDur(m.duration || 0)}</span>
+              <div class="speed-seg" id="stSpeedSeg">
+                ${[0.5, 1, 1.5, 2].map((sp) => `<button data-spd="${sp}" class="${state.studioSpeed === sp ? "active" : ""}">${sp}×</button>`).join("")}
+              </div>
+              <div style="flex:1"></div>
+              <button class="btn btn-subtle btn-sm" id="stBtnSnap" title="Сохранить текущий кадр в JPG">${iconSvg("camera", 14)}<span>Кадр</span></button>
+              <button class="btn btn-soft btn-sm" id="stBtnUseThumb" title="Открыть текущий кадр в Конструкторе обложек">${iconSvg("image", 14)}<span>На обложку</span></button>
+            </div>
+          </div>
+
+          <div class="studio-timeline-card">
+            <div class="tl-header">
+              <div class="input-row" style="flex-wrap:wrap;gap:6px;">
+                <button class="btn btn-subtle btn-sm" id="tlBtnIn" title="Установить начало выделения (I)">От [I]</button>
+                <button class="btn btn-subtle btn-sm" id="tlBtnOut" title="Установить конец выделения (O)">До [O]</button>
+                <button class="btn btn-soft btn-sm" id="tlBtnAddSeg">${iconSvg("plus", 13)}<span>В нарезку</span></button>
+                <button class="btn btn-primary btn-sm" id="tlBtnQuickTrim">${iconSvg("scissors", 13)}<span>Вырезать</span></button>
+              </div>
+              <span class="mono" id="tlRangeLbl" style="font-size:12px;color:var(--accent-light);font-weight:600;">00:00:00 — 00:01:00</span>
+            </div>
+            <div class="tl-ruler" id="tlRuler"><span>00:00</span><span>—</span><span>—</span><span>—</span><span>${fmtDur(m.duration || 0)}</span></div>
+            <div class="tl-track" id="tlTrack">
+              <div class="tl-selection" id="tlSelection"></div>
+              <div class="tl-handle left" id="tlHandleL" title="Потяните начало отрезка"></div>
+              <div class="tl-handle right" id="tlHandleR" title="Потяните конец отрезка"></div>
+              <div id="tlSegsLayer"></div>
+              <div id="tlPinsLayer"></div>
+              <div class="tl-playhead" id="tlPlayhead"></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);flex-wrap:wrap;gap:6px;">
+              <span>Тяните фиолетовые ручки для выделения · Клик по точкам — переход к маркеру/хайлайту</span>
+              <span><kbd>Space</kbd> пауза · <kbd>I</kbd>/<kbd>O</kbd> границы · <kbd>J</kbd>/<kbd>L</kbd> ±10с</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="studio-inspector-col">
+          <div class="studio-tool-tabs" id="studioToolTabs">
+            <button class="studio-tool-tab" data-sub="trim">${iconSvg("scissors", 15)}<span>Монтаж</span></button>
+            <button class="studio-tool-tab" data-sub="shorts">${iconSvg("smartphone", 15)}<span>Shorts</span></button>
+            <button class="studio-tool-tab" data-sub="highlights">${iconSvg("flame", 15)}<span>Хайлайты</span></button>
+            <button class="studio-tool-tab" data-sub="ai">${iconSvg("sparkles", 15)}<span>AI Текст</span></button>
+            <button class="studio-tool-tab" data-sub="thumbnail">${iconSvg("image", 15)}<span>Обложка</span></button>
+            <button class="studio-tool-tab" data-sub="effects">${iconSvg("sliders", 15)}<span>Эффекты</span></button>
+            <button class="studio-tool-tab" data-sub="export">${iconSvg("download", 15)}<span>Экспорт</span></button>
+          </div>
+          <div id="studioInspectorHost"></div>
+        </div>
+      </div>
+
+      <div id="studioJobsDock" style="margin-top:16px;"></div>
     `;
 
-    root.querySelectorAll("#studioSubnav button").forEach((b) => {
-      b.onclick = () => { state.studioSub = b.dataset.sub; renderStudioPage(); };
-    });
-    $("#stFileInp").oninput = (e) => { state.studioFile = e.target.value; };
     $("#btnStPick").onclick = async () => {
-      const p = await callBackend("pickFile", "Видео (*.mp4 *.mkv *.ts *.flv *.mov)");
-      if (p) { state.studioFile = p; renderStudioPage(); }
+      const p = await callBackend("pickFile", "Видео (*.mp4 *.mkv *.ts *.mov *.webm)");
+      if (p) loadStudioVideo(p);
+    };
+    $("#btnStReveal").onclick = () => callBackend("openInExplorer", state.studioFile);
+    $("#btnStCloseFile").onclick = () => {
+      state.studioFile = "";
+      state.studioMeta = null;
+      _studioLoadedSrc = "";
+      _studioProbedFile = "";
+      renderStudioPage(true);
     };
 
-    // Trim / Multi-Cut / AFK / Concat
-    $("#btnMarkIn")?.addEventListener("click", () => { const v = $("#trimVideo"); if (v) $("#trimStart").value = fmtDur(v.currentTime); });
-    $("#btnMarkOut")?.addEventListener("click", () => { const v = $("#trimVideo"); if (v) $("#trimEnd").value = fmtDur(v.currentTime); });
-    $("#btnAddCutSeg")?.addEventListener("click", () => {
-      const s = parseSec($("#trimStart").value) ?? 0, e = parseSec($("#trimEnd").value) ?? 0;
-      if (e <= s) return showToast("Multi-Cut", "Конец отрезка должен быть больше начала", "error");
-      state.multiCutSegments.push([s, e]);
-      renderStudioPage();
-    });
-    $("#btnClearMultiCut")?.addEventListener("click", () => { state.multiCutSegments = []; renderStudioPage(); });
-    root.querySelectorAll("[data-rm-seg]").forEach((btn) => {
-      btn.onclick = () => { state.multiCutSegments.splice(Number(btn.dataset.rmSeg), 1); renderStudioPage(); };
-    });
-    $("#btnRunMultiCut")?.addEventListener("click", () => {
-      if (!state.studioFile || !state.multiCutSegments.length) return showToast("Multi-Cut", "Выберите видео и добавьте отрезки", "error");
-      const out = appendFileSuffix(state.studioFile, `_montage_${state.multiCutSegments.length}cuts`, ".mp4");
-      callBackend("runStudioAction", JSON.stringify({
-        action: "multi_cut", title: `Нарезка (${state.multiCutSegments.length} отрезков)`, subtitle: state.studioFile.split(/[\\/]/).pop(),
-        params: { input_path: state.studioFile, output_path: out, segments: state.multiCutSegments, accurate: $("#trimAcc").checked }
-      }));
-    });
-    $("#btnDoTrim")?.addEventListener("click", () => {
-      const s = parseSec($("#trimStart").value) ?? 0, e = parseSec($("#trimEnd").value) ?? 0;
-      if (!state.studioFile || e <= s) return showToast("Обрезка", "Выберите видео и корректный интервал От–До", "error");
-      const out = appendFileSuffix(state.studioFile, `_cut_${Math.floor(s)}-${Math.floor(e)}`);
-      callBackend("runStudioAction", JSON.stringify({
-        action: "trim", title: `Обрезка ${fmtDur(s)}–${fmtDur(e)}`, subtitle: state.studioFile.split(/[\\/]/).pop(),
-        params: { input_path: state.studioFile, start_sec: s, end_sec: e, output_path: out, accurate: $("#trimAcc").checked }
-      }));
-    });
-    $("#btnRemoveAfk")?.addEventListener("click", () => {
-      if (!state.studioFile) return showToast("Выберите видео", "", "error");
-      const out = appendFileSuffix(state.studioFile, "_no_afk");
-      callBackend("runStudioAction", JSON.stringify({
-        action: "remove_silence_afk", title: "Удаление тишины и AFK", subtitle: state.studioFile.split(/[\\/]/).pop(),
-        params: { input_path: state.studioFile, output_path: out }
-      }));
-    });
-    $("#btnDoConcat")?.addEventListener("click", async () => {
-      const raw = await callBackend("pickVideoFiles");
-      const files = JSON.parse(raw || "[]");
-      if (files.length < 2) return;
-      const out = appendFileSuffix(files[0], "_merged", ".mp4");
-      callBackend("runStudioAction", JSON.stringify({
-        action: "concat", title: `Склейка (${files.length} файлов)`, subtitle: out.split(/[\\/]/).pop(),
-        params: { input_paths: files, output_path: out, normalize: $("#catNorm").checked }
-      }));
-    });
-    root.querySelectorAll(".st-split-preset").forEach((b) => {
+    const mon = $("#studioMonitor");
+    mon.playbackRate = state.studioSpeed;
+    const syncPlayBtn = () => {
+      const b = $("#stBtnPlay");
+      if (b) b.innerHTML = iconSvg(mon.paused ? "play" : "pause", 14);
+    };
+    mon.onplay = syncPlayBtn;
+    mon.onpause = syncPlayBtn;
+    mon.onloadedmetadata = () => {
+      if (!state.studioMeta) state.studioMeta = { duration: mon.duration };
+      else if (!state.studioMeta.duration) state.studioMeta.duration = mon.duration;
+      if (state.studioOut > mon.duration || state.studioOut <= 0) state.studioOut = mon.duration;
+      renderStudioTimelineUI();
+    };
+    mon.ontimeupdate = () => {
+      state.studioTime = mon.currentTime || 0;
+      const dur = mon.duration || state.studioMeta?.duration || 0;
+      const tc = $("#stTimecode");
+      if (tc) tc.textContent = `${fmtDur(state.studioTime)} / ${fmtDur(dur)}`;
+      const ph = $("#tlPlayhead");
+      if (ph && dur > 0) ph.style.left = `${Math.min(100, Math.max(0, (state.studioTime / dur) * 100))}%`;
+    };
+    $("#stBtnPlay").onclick = () => { if (mon.paused) mon.play(); else mon.pause(); };
+    $("#stBtnBack5").onclick = () => { mon.currentTime = Math.max(0, mon.currentTime - 5); };
+    $("#stBtnFwd5").onclick = () => { mon.currentTime = Math.min(mon.duration || 999999, mon.currentTime + 5); };
+    $("#stBtnFrameB").onclick = () => { mon.pause(); mon.currentTime = Math.max(0, mon.currentTime - (1 / 30)); };
+    $("#stBtnFrameF").onclick = () => { mon.pause(); mon.currentTime = Math.min(mon.duration || 999999, mon.currentTime + (1 / 30)); };
+    $("#stSpeedSeg").querySelectorAll("button").forEach((b) => {
       b.onclick = () => {
-        root.querySelectorAll(".st-split-preset").forEach((x) => x.classList.remove("active"));
-        b.classList.add("active");
-        if ($("#stSplitMin")) $("#stSplitMin").value = b.dataset.min;
+        state.studioSpeed = Number(b.dataset.spd) || 1;
+        mon.playbackRate = state.studioSpeed;
+        $("#stSpeedSeg").querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
       };
     });
-    $("#btnSplitParts")?.addEventListener("click", () => {
-      if (!state.studioFile) return showToast("Выберите видео", "Укажите видеофайл выше", "error");
-      const mins = Math.max(1, Number($("#stSplitMin")?.value) || 30);
-      callBackend("runStudioAction", JSON.stringify({
-        action: "split_parts",
-        title: `Разбивка по ${mins >= 60 && mins % 60 === 0 ? `${mins / 60} ч` : `${mins} мин`}`,
-        subtitle: state.studioFile.split(/[\\/]/).pop(),
-        params: { input_path: state.studioFile, segment_minutes: mins }
-      }));
-    });
+    $("#stBtnSnap").onclick = () => callBackend("saveStudioFrame", state.studioFile, mon.currentTime || 0);
+    $("#stBtnUseThumb").onclick = () => {
+      state.studioSub = "thumbnail";
+      updateStudioToolTabsUI();
+      renderStudioInspector();
+      syncStudioMonitorOverlays();
+      if ($("#thTime")) $("#thTime").value = fmtDur(mon.currentTime || 0);
+    };
 
-    // Shorts 9:16
-    $("#btnPickShortsZones")?.addEventListener("click", () => {
-      const init = [
-        state.shortsCam || { x: 0.02, y: 0.55, w: 0.28, h: 0.35, mode: "blur", strength: 10, label: "1. Вебка (верх)" },
-        state.shortsGame || { x: 0.22, y: 0.05, w: 0.56, h: 0.90, mode: "blur", strength: 10, label: "2. Геймплей (низ)" },
-      ];
-      openBlurStudio({ mode: "shorts", videoPath: state.studioFile, regions: init });
+    const track = $("#tlTrack");
+    let tlDrag = null;
+    const xToTime = (clientX) => {
+      const rect = track.getBoundingClientRect();
+      const dur = mon.duration || state.studioMeta?.duration || 60;
+      const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+      return ratio * dur;
+    };
+    track.addEventListener("mousedown", (e) => {
+      if (e.target.closest(".tl-pin")) return;
+      if (e.target.id === "tlHandleL") tlDrag = "in";
+      else if (e.target.id === "tlHandleR") tlDrag = "out";
+      else {
+        tlDrag = "seek";
+        mon.currentTime = xToTime(e.clientX);
+      }
     });
-    $("#btnRunShorts")?.addEventListener("click", () => {
-      if (!state.studioFile) return showToast("Выберите видео", "", "error");
-      const mode = $("#shortsMode").value;
-      const out = appendFileSuffix(state.studioFile, `_shorts_${mode}`, ".mp4");
-      callBackend("runStudioAction", JSON.stringify({
-        action: "shorts", title: "Рендер Shorts 9:16", subtitle: "1080×1920",
-        params: {
-          input_path: state.studioFile, output_path: out,
-          layout: mode,
-          cam_region: mode !== "blur_bg" ? (state.shortsCam || { x: 0.02, y: 0.55, w: 0.28, h: 0.35 }) : null,
-          game_region: mode !== "blur_bg" ? (state.shortsGame || { x: 0.22, y: 0.05, w: 0.56, h: 0.90 }) : null,
-          blur_channel_key: $("#shortsBlurCh").value,
-          progress_bar: $("#shortsProgBar")?.checked !== false,
-          killcam_zoom: !!$("#shortsKillcam")?.checked,
-        }
-      }));
-    });
+    const onTlMove = (e) => {
+      if (!tlDrag) return;
+      if (!$("#tlTrack")) { tlDrag = null; return; }
+      const t = xToTime(e.clientX);
+      const dur = mon.duration || state.studioMeta?.duration || 60;
+      if (tlDrag === "in") {
+        state.studioIn = Math.max(0, Math.min(state.studioOut - 0.5, t));
+        mon.currentTime = state.studioIn;
+        renderStudioTimelineUI();
+      } else if (tlDrag === "out") {
+        state.studioOut = Math.min(dur, Math.max(state.studioIn + 0.5, t));
+        mon.currentTime = state.studioOut;
+        renderStudioTimelineUI();
+      } else if (tlDrag === "seek") {
+        mon.currentTime = t;
+      }
+    };
+    window.addEventListener("mousemove", onTlMove);
+    window.addEventListener("mouseup", () => { tlDrag = null; });
 
-    // Highlights & Chat (#19, #25, #33)
-    $("#btnPickChat")?.addEventListener("click", async () => {
-      const p = await callBackend("pickFile", "Чат JSON (*.json)");
-      if (p) { state.studioChatFile = p; renderStudioPage(); }
-    });
-    $("#btnScanChat")?.addEventListener("click", () => {
-      const path = $("#hlChatInp").value.trim() || appendFileSuffix(state.studioFile, "", ".chat.json");
-      state.studioChatFile = path;
-      callBackend("analyzeHighlights", "chat", path);
-      showToast("Анализ чата", "Строим тепловую карту активности...", "info");
-    });
-    $("#btnScanAudio")?.addEventListener("click", () => {
-      if (!state.studioFile) return showToast("Выберите видео", "", "error");
-      callBackend("analyzeHighlights", "audio", state.studioFile);
-      showToast("Анализ звука", "Ищем громкие моменты...", "info");
-    });
-    $("#btnScanEvents")?.addEventListener("click", () => {
-      if (!state.studioFile) return showToast("Выберите видео", "", "error");
-      callBackend("analyzeHighlights", "events", state.studioFile);
-      showToast("AI Детектор эмоций", "Ищем смех, крики и выстрелы...", "info");
-    });
-    $("#btnFetchVodChat")?.addEventListener("click", () => {
-      const url = $("#hlVodUrl").value.trim();
-      if (!url) return showToast("Чат VOD", "Вставьте ссылку на Twitch VOD", "error");
-      callBackend("downloadVodChat", url, state.studioFile || "");
-    });
-    $("#btnExportEdl")?.addEventListener("click", () => {
-      callBackend("exportHighlightsEdl", state.studioFile, JSON.stringify(state.highlights.highlights || []));
-    });
-    $("#btnBatchCutHl")?.addEventListener("click", () => {
-      if (!state.studioFile) return showToast("Выберите видео", "", "error");
-      const tsList = (state.highlights.highlights || []).map((h) => h.timestamp_sec);
-      if (!tsList.length) return;
+    $("#tlBtnIn").onclick = () => {
+      state.studioIn = Math.min(mon.currentTime || 0, Math.max(0, state.studioOut - 0.5));
+      renderStudioTimelineUI();
+    };
+    $("#tlBtnOut").onclick = () => {
+      state.studioOut = Math.max(mon.currentTime || 0, state.studioIn + 0.5);
+      renderStudioTimelineUI();
+    };
+    $("#tlBtnAddSeg").onclick = () => {
+      if (state.studioOut <= state.studioIn) return showToast("Отрезок", "Конец должен быть больше начала", "error");
+      state.multiCutSegments.push([state.studioIn, state.studioOut]);
+      renderStudioTimelineUI();
+      if (state.studioSub === "trim") renderStudioInspector();
+      showToast("Добавлено в нарезку", `${fmtDur(state.studioIn)} – ${fmtDur(state.studioOut)}`, "success");
+    };
+    $("#tlBtnQuickTrim").onclick = () => {
+      if (state.studioOut <= state.studioIn) return showToast("Обрезка", "Выберите корректный интервал", "error");
+      const out = appendFileSuffix(state.studioFile, `_cut_${Math.floor(state.studioIn)}-${Math.floor(state.studioOut)}`);
       callBackend("runStudioAction", JSON.stringify({
-        action: "batch_highlights", title: `Пакет хайлайтов (${tsList.length} шт.)`, subtitle: state.studioFile.split(/[\\/]/).pop(),
-        params: { input_path: state.studioFile, timestamps: tsList, pad_sec: 20 }
+        action: "trim", title: `Обрезка ${fmtDur(state.studioIn)}–${fmtDur(state.studioOut)}`, subtitle: fname,
+        params: { input_path: state.studioFile, start_sec: state.studioIn, end_sec: state.studioOut, output_path: out, accurate: $("#trimAcc")?.checked ?? true }
       }));
-    });
-    $("#btnBatchShortsHl")?.addEventListener("click", () => {
-      if (!state.studioFile) return showToast("Выберите видео", "", "error");
-      const tsList = (state.highlights.highlights || []).map((h) => h.timestamp_sec);
-      if (!tsList.length) return;
-      callBackend("runStudioAction", JSON.stringify({
-        action: "batch_shorts", title: `Пакет Shorts 9:16 (${tsList.length} шт.)`, subtitle: state.studioFile.split(/[\\/]/).pop(),
-        params: {
-          input_path: state.studioFile, timestamps: tsList, pad_sec: 20,
-          layout: "split",
-          cam_region: state.shortsCam || { x: 0.02, y: 0.55, w: 0.28, h: 0.35 },
-          game_region: state.shortsGame || { x: 0.22, y: 0.05, w: 0.56, h: 0.90 },
-          progress_bar: true,
-        }
-      }));
-    });
-    $("#btnBurnChat")?.addEventListener("click", () => {
-      if (!state.studioFile) return showToast("Выберите видео", "", "error");
-      const baseChat = ($("#hlChatInp")?.value.trim() || state.studioChatFile || state.studioFile);
-      const assPath = baseChat.endsWith(".chat.json")
-        ? baseChat.replace(/\.chat\.json$/, ".chat.ass")
-        : appendFileSuffix(baseChat, "", ".chat.ass");
-      const out = appendFileSuffix(state.studioFile, "_with_chat");
-      callBackend("runStudioAction", JSON.stringify({
-        action: "burn_chat", title: "Наложение чата", subtitle: state.studioFile.split(/[\\/]/).pop(),
-        params: { input_path: state.studioFile, ass_path: assPath, output_path: out }
-      }));
-    });
-    root.querySelectorAll(".act-cut-hl").forEach((b) => {
+    };
+
+    $("#studioToolTabs").querySelectorAll(".studio-tool-tab").forEach((b) => {
       b.onclick = () => {
-        if (!state.studioFile) return showToast("Выберите видео", "", "error");
-        const t = Number(b.dataset.ts);
-        const s = Math.max(0, t - 20), e = t + 20;
-        const out = appendFileSuffix(state.studioFile, `_hl_${Math.floor(t)}s`);
+        state.studioSub = b.dataset.sub;
+        updateStudioToolTabsUI();
+        renderStudioInspector();
+        syncStudioMonitorOverlays();
+      };
+    });
+
+    updateStudioToolTabsUI();
+    renderStudioInspector();
+    syncStudioMonitorOverlays();
+    renderStudioTimelineUI();
+    renderStudioJobsDock(stJobs);
+  }
+
+  function updateStudioToolTabsUI() {
+    $("#studioToolTabs")?.querySelectorAll(".studio-tool-tab").forEach((b) => {
+      b.classList.toggle("active", b.dataset.sub === state.studioSub);
+    });
+  }
+
+  function syncStudioMonitorOverlays() {
+    const mon = $("#studioMonitor");
+    if (!mon) return;
+    mon.style.filter = state.studioSub === "effects" ? studioFxCssFilter() : "";
+    $("#monShortsGuide")?.classList.toggle("hidden", state.studioSub !== "shorts");
+    const tp = $("#monThumbPreview");
+    if (tp) {
+      const showTh = state.studioSub === "thumbnail";
+      tp.classList.toggle("hidden", !showTh);
+      if (showTh) {
+        tp.style.setProperty("--thumb-accent", state.studioThumb.accent || "#8b5cf6");
+        $("#monThumbHead").textContent = state.studioThumb.headline || "ЛУЧШИЙ МОМЕНТ СТРИМА";
+        $("#monThumbSub").textContent = state.studioThumb.subtitle || "TWITCH HIGHLIGHTS";
+      }
+    }
+  }
+
+  function renderStudioTimelineUI() {
+    const mon = $("#studioMonitor");
+    const dur = Math.max(1, mon?.duration || state.studioMeta?.duration || 60);
+    const inPct = Math.min(100, Math.max(0, (state.studioIn / dur) * 100));
+    const outPct = Math.min(100, Math.max(inPct, (state.studioOut / dur) * 100));
+
+    const sel = $("#tlSelection"), hl = $("#tlHandleL"), hr = $("#tlHandleR"), lbl = $("#tlRangeLbl");
+    if (sel) { sel.style.left = `${inPct}%`; sel.style.width = `${Math.max(0.5, outPct - inPct)}%`; }
+    if (hl) hl.style.left = `${inPct}%`;
+    if (hr) hr.style.left = `${outPct}%`;
+    if (lbl) lbl.textContent = `${fmtDur(state.studioIn)} — ${fmtDur(state.studioOut)} (${fmtDur(Math.max(0, state.studioOut - state.studioIn))})`;
+
+    if ($("#trimStart")) $("#trimStart").value = fmtDur(state.studioIn);
+    if ($("#trimEnd")) $("#trimEnd").value = fmtDur(state.studioOut);
+
+    const ruler = $("#tlRuler");
+    if (ruler) {
+      ruler.innerHTML = [0, 0.25, 0.5, 0.75, 1].map((f) => `<span>${fmtDur(dur * f)}</span>`).join("");
+    }
+
+    const segsEl = $("#tlSegsLayer");
+    if (segsEl) {
+      segsEl.innerHTML = (state.multiCutSegments || []).map((s) => {
+        const l = Math.min(100, Math.max(0, (s[0] / dur) * 100));
+        const w = Math.max(0.8, Math.min(100 - l, ((s[1] - s[0]) / dur) * 100));
+        return `<div class="tl-seg-bar" style="left:${l}%;width:${w}%;"></div>`;
+      }).join("");
+    }
+
+    const pinsEl = $("#tlPinsLayer");
+    if (pinsEl) {
+      const mPins = (state.studioMeta?.markers || []).map((m) => ({
+        t: Number(m.t) || 0, note: m.note || "Маркер", cls: "marker"
+      }));
+      const hPins = (state.highlights?.highlights || []).map((h) => ({
+        t: Number(h.timestamp_sec) || 0, note: h.reason || h.label || "Хайлайт", cls: "hl"
+      }));
+      pinsEl.innerHTML = [...mPins, ...hPins].map((p) => {
+        const left = Math.min(99.5, Math.max(0.5, (p.t / dur) * 100));
+        return `<div class="tl-pin ${p.cls}" data-t="${p.t}" style="left:${left}%;" title="${fmtDur(p.t)} · ${esc(p.note)}"></div>`;
+      }).join("");
+      pinsEl.querySelectorAll(".tl-pin").forEach((el) => {
+        el.onclick = (e) => {
+          e.stopPropagation();
+          if (mon) mon.currentTime = Number(el.dataset.t) || 0;
+        };
+      });
+    }
+  }
+
+  function renderStudioJobsDock(stJobs) {
+    const dock = $("#studioJobsDock");
+    if (!dock) return;
+    if (!stJobs.length) { dock.innerHTML = ""; return; }
+    dock.innerHTML = `
+      <div class="section-heading"><span>Очередь рендера Студии (${stJobs.length})</span></div>
+      ${stJobs.slice(0, 6).map(renderJobCard).join("")}
+    `;
+    bindJobEvents(dock);
+  }
+
+  function renderStudioInspector() {
+    const host = $("#studioInspectorHost");
+    if (!host) return;
+    const chPresets = state.channels.filter((c) => (c.blur_regions || []).length > 0);
+    const fname = state.studioFile.split(/[\\/]/).pop();
+    const mon = $("#studioMonitor");
+
+    if (state.studioSub === "trim") {
+      host.innerHTML = `
+        <div class="studio-inspector-card">
+          <div class="inspector-group-title"><span>Обрезка отрезка</span></div>
+          <div class="form-grid-2">
+            <div class="field"><label>Начало (I)</label><input class="input mono" id="trimStart" value="${fmtDur(state.studioIn)}" /></div>
+            <div class="field"><label>Конец (O)</label><input class="input mono" id="trimEnd" value="${fmtDur(state.studioOut)}" /></div>
+          </div>
+          <label class="switch-inline"><input type="checkbox" id="trimAcc" checked/><span class="switch-track"></span><span style="font-size:12.5px;">Точный кадр (перекодирование)</span></label>
+          <div class="input-row">
+            <button class="btn btn-primary btn-full" id="btnDoTrim">${iconSvg("scissors", 14)}<span>Вырезать отрезок</span></button>
+            <button class="btn btn-soft" id="btnRemoveAfk" title="Удалить тишину и статичные экраны AFK">${iconSvg("sparkles", 14)}<span>Анти-AFK</span></button>
+          </div>
+        </div>
+
+        ${state.multiCutSegments.length > 0 ? `
+          <div class="studio-inspector-card">
+            <div class="inspector-group-title"><span>Multi-Cut нарезка (${state.multiCutSegments.length})</span><button class="btn btn-danger-ghost btn-sm" id="btnClearMultiCut">Очистить</button></div>
+            <div class="multicut-list">
+              ${state.multiCutSegments.map((seg, i) => `
+                <span class="multicut-chip">#${i + 1} ${fmtDur(seg[0])}–${fmtDur(seg[1])} <button data-rm-seg="${i}">×</button></span>
+              `).join("")}
+            </div>
+            <button class="btn btn-success btn-full" id="btnRunMultiCut">${iconSvg("film", 14)}<span>Собрать нарезку (${state.multiCutSegments.length})</span></button>
+          </div>
+        ` : ""}
+
+        <div class="studio-inspector-card">
+          <div class="inspector-group-title"><span>Разбить видео на равные части</span></div>
+          <div style="font-size:12px;color:var(--text-muted);">Мгновенно без перекодирования нарежет стрим на файлы по 30 мин, 1 часу и т.д.</div>
+          <div class="split-pills">
+            <button class="split-pill st-split-preset" data-min="15">15 мин</button>
+            <button class="split-pill st-split-preset active" data-min="30">30 мин</button>
+            <button class="split-pill st-split-preset" data-min="60">1 час</button>
+            <button class="split-pill st-split-preset" data-min="120">2 часа</button>
+          </div>
+          <div class="input-row">
+            <input type="number" class="input mono" id="stSplitMin" value="30" min="1" max="600" style="width:90px;" />
+            <span style="font-size:12px;color:var(--text-muted);">минут</span>
+            <div style="flex:1"></div>
+            <button class="btn btn-primary btn-sm" id="btnSplitParts">${iconSvg("scissors", 14)}<span>Разбить</span></button>
+          </div>
+        </div>
+
+        <div class="studio-inspector-card">
+          <div class="inspector-group-title"><span>Склейка файлов</span></div>
+          <label class="switch-inline"><input type="checkbox" id="catNorm"/><span class="switch-track"></span><span style="font-size:12.5px;">Выровнять разные видео в 1080p60</span></label>
+          <button class="btn btn-subtle btn-full" id="btnDoConcat">${iconSvg("plus", 14)}<span>Выбрать 2+ файлов и склеить</span></button>
+        </div>
+      `;
+      $("#trimStart").onchange = (e) => { const v = parseSec(e.target.value); if (v != null) { state.studioIn = v; renderStudioTimelineUI(); } };
+      $("#trimEnd").onchange = (e) => { const v = parseSec(e.target.value); if (v != null) { state.studioOut = v; renderStudioTimelineUI(); } };
+      $("#btnDoTrim").onclick = () => $("#tlBtnQuickTrim")?.click();
+      $("#btnRemoveAfk").onclick = () => {
+        const out = appendFileSuffix(state.studioFile, "_no_afk");
         callBackend("runStudioAction", JSON.stringify({
-          action: "trim", title: `Хайлайт ${fmtDur(t)}`, subtitle: "±20 сек",
-          params: { input_path: state.studioFile, start_sec: s, end_sec: e, output_path: out, accurate: false }
+          action: "remove_silence_afk", title: "Удаление тишины и AFK", subtitle: fname,
+          params: { input_path: state.studioFile, output_path: out }
         }));
       };
-    });
-
-    // AI Whisper + YouTube SEO (#20, #26, #30)
-    $("#btnAiSubs")?.addEventListener("click", () => {
-      const langVal = $("#aiLang").value;
-      const isTranslate = langVal === "translate_en";
-      callBackend("runStudioAction", JSON.stringify({
-        action: "subtitles", title: isTranslate ? "Whisper Перевод RU → EN" : "Whisper Караоке-субтитры", subtitle: `Модель ${$("#aiModel").value}`,
-        input_path: state.studioFile, model: $("#aiModel").value,
-        language: isTranslate ? "ru" : langVal,
-        task: isTranslate ? "translate" : "transcribe",
-        burn_subtitles: $("#aiBurn").checked, shorts_style: true, whisper_prompt: $("#aiPrompt").value.trim(),
-      }));
-    });
-    $("#btnAiCensor")?.addEventListener("click", () => {
-      const langVal = $("#aiLang").value;
-      callBackend("runStudioAction", JSON.stringify({
-        action: "censor", title: "AI Аудио-цензура", subtitle: `Модель ${$("#aiModel").value}`,
-        input_path: state.studioFile, model: $("#aiModel").value, language: langVal === "translate_en" ? "ru" : langVal,
-        banned_words: $("#aiBanned").value, censor_beep: $("#aiBeep").checked, whisper_prompt: $("#aiPrompt").value.trim(),
-      }));
-    });
-    $("#btnGenYtMeta")?.addEventListener("click", () => {
-      callBackend("generateYouTubeMeta", state.studioFile);
-    });
-    $("#btnGenDigest")?.addEventListener("click", () => {
-      if (!state.studioFile) return showToast("Выберите видео", "", "error");
-      callBackend("generateStreamDigest", state.studioFile);
-      showToast("AI Конспект", "Анализируем запись, маркеры и чат...", "info");
-    });
-    $("#btnCopyDigest")?.addEventListener("click", () => {
-      if (!state.streamDigest) return;
-      navigator.clipboard?.writeText(state.streamDigest);
-      showToast("Скопировано", "Конспект стрима в буфере обмена", "success");
-    });
-    $("#btnCopyYtMeta")?.addEventListener("click", () => {
-      if (!state.ytMeta) return;
-      const txt = `${(state.ytMeta.titles || []).join("\n")}\n\n${state.ytMeta.description || ""}\n\nТеги: ${state.ytMeta.tags || ""}`;
-      navigator.clipboard?.writeText(txt);
-      showToast("Скопировано", "Заголовки, описание и теги в буфере обмена", "success");
-    });
-
-    // Thumbnail Maker
-    $("#btnCreateThumb")?.addEventListener("click", async () => {
-      if (!state.studioFile) return showToast("Выберите видео", "", "error");
-      const raw = await callBackend("createThumbnail", JSON.stringify({
-        video_path: state.studioFile,
-        timestamp_sec: parseSec($("#thTime")?.value) ?? 15,
-        headline: $("#thHeadline")?.value.trim() || "ЛУЧШИЙ МОМЕНТ СТРИМА",
-        subtitle: $("#thSubtitle")?.value.trim() || "TWITCH HIGHLIGHTS",
-        accent_color: $("#thAccent")?.value || "#8b5cf6",
-      }));
-      try {
-        const res = JSON.parse(raw || "{}");
-        if (res.ok && res.output_path) {
-          state.lastThumbPath = res.output_path;
-          renderStudioPage();
-        }
-      } catch {}
-    });
-    $("#btnRevealThumb")?.addEventListener("click", () => {
-      if (state.lastThumbPath) callBackend("openInExplorer", state.lastThumbPath);
-    });
-
-    // Export (#23, #24)
-    $("#btnPickWm")?.addEventListener("click", async () => {
-      const p = await callBackend("pickFile", "Картинки PNG/WebP (*.png *.webp *.jpg)");
-      if (p && $("#expWmPath")) $("#expWmPath").value = p;
-    });
-    $("#btnDoExport")?.addEventListener("click", () => {
-      if (!state.studioFile) return showToast("Выберите видео", "", "error");
-      const pid = $("#expPreset").value;
-      const out = appendFileSuffix(state.studioFile, `_${pid}`, ".mp4");
-      callBackend("runStudioAction", JSON.stringify({
-        action: "export_preset", title: `Экспорт (${state.exportPresets[pid]?.label || pid})`, subtitle: state.studioFile.split(/[\\/]/).pop(),
-        params: {
-          input_path: state.studioFile, output_path: out, preset_id: pid,
-          normalize_audio: $("#expNorm").checked,
-          voice_enhance: $("#expVoice").checked,
-          watermark_path: $("#expWmPath").value.trim(),
-        }
-      }));
-    });
-    $("#btnExtractMp3")?.addEventListener("click", () => {
-      if (!state.studioFile) return showToast("Выберите видео", "", "error");
-      const out = appendFileSuffix(state.studioFile, "_audio", ".mp3");
-      callBackend("runStudioAction", JSON.stringify({
-        action: "extract_audio", title: "Извлечение MP3 дорожки", subtitle: state.studioFile.split(/[\\/]/).pop(),
-        params: { input_path: state.studioFile, output_path: out, format: "mp3" }
-      }));
-    });
-    $("#btnPubTgNow")?.addEventListener("click", () => {
-      if (!state.studioFile) return showToast("Выберите видео", "", "error");
-      callBackend("publishVideoToTelegram", state.studioFile, "");
-    });
-
-    bindJobEvents(root);
+      host.querySelectorAll("[data-rm-seg]").forEach((b) => {
+        b.onclick = () => { state.multiCutSegments.splice(Number(b.dataset.rmSeg), 1); renderStudioInspector(); renderStudioTimelineUI(); };
+      });
+      $("#btnClearMultiCut")?.addEventListener("click", () => { state.multiCutSegments = []; renderStudioInspector(); renderStudioTimelineUI(); });
+      $("#btnRunMultiCut")?.addEventListener("click", () => {
+        const out = appendFileSuffix(state.studioFile, `_montage_${state.multiCutSegments.length}cuts`, ".mp4");
+        callBackend("runStudioAction", JSON.stringify({
+          action: "multi_cut", title: `Нарезка (${state.multiCutSegments.length} отрезков)`, subtitle: fname,
+          params: { input_path: state.studioFile, output_path: out, segments: state.multiCutSegments, accurate: $("#trimAcc")?.checked ?? true }
+        }));
+      });
+      host.querySelectorAll(".st-split-preset").forEach((b) => {
+        b.onclick = () => {
+          host.querySelectorAll(".st-split-preset").forEach((x) => x.classList.remove("active"));
+          b.classList.add("active");
+          $("#stSplitMin").value = b.dataset.min;
+        };
+      });
+      $("#btnSplitParts").onclick = () => {
+        const mins = Math.max(1, Number($("#stSplitMin").value) || 30);
+        callBackend("runStudioAction", JSON.stringify({
+          action: "split_parts",
+          title: `Разбивка по ${mins >= 60 && mins % 60 === 0 ? `${mins / 60} ч` : `${mins} мин`}`,
+          subtitle: fname,
+          params: { input_path: state.studioFile, segment_minutes: mins }
+        }));
+      };
+      $("#btnDoConcat").onclick = async () => {
+        const raw = await callBackend("pickVideoFiles");
+        const files = JSON.parse(raw || "[]");
+        if (files.length < 2) return;
+        const out = appendFileSuffix(files[0], "_merged", ".mp4");
+        callBackend("runStudioAction", JSON.stringify({
+          action: "concat", title: `Склейка (${files.length} файлов)`, subtitle: out.split(/[\\/]/).pop(),
+          params: { input_paths: files, output_path: out, normalize: $("#catNorm").checked }
+        }));
+      };
+    } else if (state.studioSub === "shorts") {
+      host.innerHTML = `
+        <div class="studio-inspector-card">
+          <div class="inspector-group-title"><span>Вертикальный Shorts / TikTok 9:16</span></div>
+          <div class="field">
+            <label>Шаблон компоновки (1080×1920)</label>
+            <select class="input-select" id="shortsMode">
+              <option value="split">Вебка сверху + Геймплей снизу</option>
+              <option value="pip_circle">Круглая вебка (PiP) поверх геймплея</option>
+              <option value="pip_rounded">Скруглённая вебка (PiP) поверх геймплея</option>
+              <option value="blur_bg">Видео по центру + размытый фон</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Пресет блюра баннера (опционально)</label>
+            <select class="input-select" id="shortsBlurCh">
+              <option value="">Без блюра</option>
+              ${chPresets.map((c) => `<option value="${esc(c.key)}">Канал ${esc(c.username)} (${c.blur_regions.length} зон)</option>`).join("")}
+            </select>
+          </div>
+          <label class="switch-inline"><input type="checkbox" id="shortsProgBar" checked/><span class="switch-track"></span><span style="font-size:12.5px;">Анимированный прогресс-бар снизу</span></label>
+          <label class="switch-inline"><input type="checkbox" id="shortsKillcam"/><span class="switch-track"></span><span style="font-size:12.5px;">Killcam 1.35× зум на центр/прицел</span></label>
+          <button class="btn btn-soft btn-full" id="btnPickShortsZones">${iconSvg("crop", 14)}<span>Выделить Вебку (1) и Геймплей (2)</span></button>
+          <button class="btn btn-primary btn-full" id="btnRunShorts">${iconSvg("smartphone", 14)}<span>Создать Shorts 9:16</span></button>
+        </div>
+      `;
+      $("#btnPickShortsZones").onclick = () => {
+        const init = [
+          state.shortsCam || { x: 0.02, y: 0.55, w: 0.28, h: 0.35, mode: "blur", strength: 10, label: "1. Вебка (верх)" },
+          state.shortsGame || { x: 0.22, y: 0.05, w: 0.56, h: 0.90, mode: "blur", strength: 10, label: "2. Геймплей (низ)" },
+        ];
+        openBlurStudio({ mode: "shorts", videoPath: state.studioFile, regions: init });
+      };
+      $("#btnRunShorts").onclick = () => {
+        const mode = $("#shortsMode").value;
+        const out = appendFileSuffix(state.studioFile, `_shorts_${mode}`, ".mp4");
+        callBackend("runStudioAction", JSON.stringify({
+          action: "shorts", title: "Рендер Shorts 9:16", subtitle: "1080×1920",
+          params: {
+            input_path: state.studioFile, output_path: out, layout: mode,
+            cam_region: mode !== "blur_bg" ? (state.shortsCam || { x: 0.02, y: 0.55, w: 0.28, h: 0.35 }) : null,
+            game_region: mode !== "blur_bg" ? (state.shortsGame || { x: 0.22, y: 0.05, w: 0.56, h: 0.90 }) : null,
+            blur_channel_key: $("#shortsBlurCh").value,
+            progress_bar: $("#shortsProgBar").checked,
+            killcam_zoom: $("#shortsKillcam").checked,
+          }
+        }));
+      };
+    } else if (state.studioSub === "highlights") {
+      const hls = state.highlights.highlights || [];
+      host.innerHTML = `
+        <div class="studio-inspector-card">
+          <div class="inspector-group-title"><span>Поиск лучших моментов</span></div>
+          <div class="input-row">
+            <input class="input" id="hlChatInp" value="${esc(state.studioChatFile)}" placeholder="Файл .chat.json..." />
+            <button class="btn btn-subtle btn-sm" id="btnPickChat">${iconSvg("folder", 14)}</button>
+          </div>
+          <div class="form-grid-2" style="gap:8px;">
+            <button class="btn btn-primary btn-sm" id="btnScanChat">${iconSvg("flame", 14)}<span>Анализ чата</span></button>
+            <button class="btn btn-soft btn-sm" id="btnScanAudio">${iconSvg("volume", 14)}<span>Громкие пики</span></button>
+            <button class="btn btn-soft btn-sm" id="btnScanEvents">${iconSvg("sparkles", 14)}<span>Смех / Крики</span></button>
+            <button class="btn btn-subtle btn-sm" id="btnBurnChat">${iconSvg("video", 14)}<span>Вшить чат</span></button>
+          </div>
+          <div class="input-row">
+            <input class="input" id="hlVodUrl" placeholder="Ссылка на Twitch VOD для чата..." />
+            <button class="btn btn-subtle btn-sm" id="btnFetchVodChat">${iconSvg("download", 14)}</button>
+          </div>
+          <div class="heatmap-box" style="height:110px;">${renderHeatmapSvg()}</div>
+          ${hls.length ? `
+            <div class="input-row" style="flex-wrap:wrap;gap:6px;">
+              <button class="btn btn-primary btn-sm" id="btnBatchShortsHl">${iconSvg("smartphone", 13)}<span>Все в Shorts (${hls.length})</span></button>
+              <button class="btn btn-soft btn-sm" id="btnBatchCutHl">${iconSvg("scissors", 13)}<span>Нарезать все</span></button>
+              <button class="btn btn-subtle btn-sm" id="btnExportEdl">EDL</button>
+            </div>
+            <div class="hl-list">
+              ${hls.map((h) => `
+                <div class="hl-row">
+                  <span class="mono act-jump-hl" data-ts="${h.timestamp_sec}" style="cursor:pointer;color:var(--accent-light);font-weight:700;">${fmtDur(h.timestamp_sec)}</span>
+                  <span style="flex:1;font-size:11.5px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(h.reason || h.label || "")}</span>
+                  <button class="btn btn-soft btn-sm act-cut-hl" data-ts="${h.timestamp_sec}">±20с</button>
+                </div>
+              `).join("")}
+            </div>
+          ` : ""}
+        </div>
+      `;
+      $("#btnPickChat").onclick = async () => { const p = await callBackend("pickFile", "Чат JSON (*.json)"); if (p) { state.studioChatFile = p; renderStudioInspector(); } };
+      $("#btnScanChat").onclick = () => {
+        const path = $("#hlChatInp").value.trim() || appendFileSuffix(state.studioFile, "", ".chat.json");
+        state.studioChatFile = path;
+        callBackend("analyzeHighlights", "chat", path);
+      };
+      $("#btnScanAudio").onclick = () => callBackend("analyzeHighlights", "audio", state.studioFile);
+      $("#btnScanEvents").onclick = () => callBackend("analyzeHighlights", "events", state.studioFile);
+      $("#btnFetchVodChat").onclick = () => { const u = $("#hlVodUrl").value.trim(); if (u) callBackend("downloadVodChat", u, state.studioFile); };
+      $("#btnExportEdl")?.addEventListener("click", () => callBackend("exportHighlightsEdl", state.studioFile, JSON.stringify(hls)));
+      $("#btnBatchCutHl")?.addEventListener("click", () => {
+        callBackend("runStudioAction", JSON.stringify({ action: "batch_highlights", title: `Пакет хайлайтов (${hls.length})`, subtitle: fname, params: { input_path: state.studioFile, timestamps: hls.map((h) => h.timestamp_sec), pad_sec: 20 } }));
+      });
+      $("#btnBatchShortsHl")?.addEventListener("click", () => {
+        callBackend("runStudioAction", JSON.stringify({
+          action: "batch_shorts", title: `Пакет Shorts 9:16 (${hls.length})`, subtitle: fname,
+          params: { input_path: state.studioFile, timestamps: hls.map((h) => h.timestamp_sec), pad_sec: 20, layout: "split", cam_region: state.shortsCam || { x: 0.02, y: 0.55, w: 0.28, h: 0.35 }, game_region: state.shortsGame || { x: 0.22, y: 0.05, w: 0.56, h: 0.90 }, progress_bar: true }
+        }));
+      });
+      $("#btnBurnChat").onclick = () => {
+        const baseChat = ($("#hlChatInp").value.trim() || state.studioChatFile || state.studioFile);
+        const assPath = baseChat.endsWith(".chat.json") ? baseChat.replace(/\.chat\.json$/, ".chat.ass") : appendFileSuffix(baseChat, "", ".chat.ass");
+        callBackend("runStudioAction", JSON.stringify({ action: "burn_chat", title: "Наложение чата", subtitle: fname, params: { input_path: state.studioFile, ass_path: assPath, output_path: appendFileSuffix(state.studioFile, "_with_chat") } }));
+      };
+      host.querySelectorAll(".act-jump-hl").forEach((el) => { el.onclick = () => { if (mon) mon.currentTime = Number(el.dataset.ts) || 0; }; });
+      host.querySelectorAll(".act-cut-hl").forEach((b) => {
+        b.onclick = () => {
+          const t = Number(b.dataset.ts);
+          callBackend("runStudioAction", JSON.stringify({ action: "trim", title: `Хайлайт ${fmtDur(t)}`, subtitle: "±20 сек", params: { input_path: state.studioFile, start_sec: Math.max(0, t - 20), end_sec: t + 20, output_path: appendFileSuffix(state.studioFile, `_hl_${Math.floor(t)}s`), accurate: false } }));
+        };
+      });
+    } else if (state.studioSub === "ai") {
+      host.innerHTML = `
+        <div class="studio-inspector-card">
+          <div class="inspector-group-title"><span>Whisper AI Субтитры и Цензура</span></div>
+          <div class="form-grid-2">
+            <div class="field"><label>Модель</label><select class="input-select" id="aiModel">${["tiny", "base", "small", "medium"].map((m) => `<option value="${m}" ${(state.config.whisper_model || "small") === m ? "selected" : ""}>${m}</option>`).join("")}</select></div>
+            <div class="field"><label>Язык / Перевод</label><select class="input-select" id="aiLang"><option value="ru">Русский</option><option value="en">English</option><option value="auto">Авто</option><option value="translate_en">RU → EN Перевод</option></select></div>
+          </div>
+          <div class="field"><label>Словарь сленга / ников</label><input class="input" id="aiPrompt" value="${esc(state.config.whisper_prompt || "")}" placeholder="skywhywalker, клатч..." /></div>
+          <div class="field"><label>Слова для аудио-цензуры</label><input class="input" id="aiBanned" value="${esc(state.config.banned_words || "")}" /></div>
+          <div class="input-row" style="flex-wrap:wrap;">
+            <label class="switch-inline"><input type="checkbox" id="aiBurn" checked/><span class="switch-track"></span><span style="font-size:12px;">Вшить субтитры</span></label>
+            <label class="switch-inline"><input type="checkbox" id="aiBeep" checked/><span class="switch-track"></span><span style="font-size:12px;">Писк цензуры</span></label>
+          </div>
+          <div class="form-grid-2" style="gap:8px;">
+            <button class="btn btn-primary btn-sm" id="btnAiSubs">${iconSvg("sparkles", 14)}<span>Субтитры</span></button>
+            <button class="btn btn-soft btn-sm" id="btnAiCensor">${iconSvg("volume", 14)}<span>Цензура</span></button>
+          </div>
+        </div>
+        <div class="studio-inspector-card">
+          <div class="inspector-group-title"><span>AI Конспект и YouTube SEO</span></div>
+          <div class="form-grid-2" style="gap:8px;">
+            <button class="btn btn-soft btn-sm" id="btnGenYtMeta">${iconSvg("sparkles", 14)}<span>YouTube SEO</span></button>
+            <button class="btn btn-subtle btn-sm" id="btnGenDigest">${iconSvg("bookmark", 14)}<span>Конспект</span></button>
+          </div>
+          ${state.ytMeta ? `<div class="yt-meta-box"><div class="input-row" style="justify-content:space-between;"><strong style="font-size:12px;">SEO для YouTube</strong><button class="btn btn-subtle btn-sm" id="btnCopyYtMeta">${iconSvg("copy", 12)}<span>Копировать</span></button></div><textarea readonly>${esc((state.ytMeta.titles || []).join("\n") + "\n\n" + (state.ytMeta.description || ""))}</textarea></div>` : ""}
+          ${state.streamDigest ? `<div class="yt-meta-box"><div class="input-row" style="justify-content:space-between;"><strong style="font-size:12px;">Конспект стрима</strong><button class="btn btn-subtle btn-sm" id="btnCopyDigest">${iconSvg("copy", 12)}<span>Копировать</span></button></div><textarea readonly style="min-height:110px;">${esc(state.streamDigest)}</textarea></div>` : ""}
+        </div>
+      `;
+      $("#btnAiSubs").onclick = () => {
+        const lv = $("#aiLang").value, isTr = lv === "translate_en";
+        callBackend("runStudioAction", JSON.stringify({ action: "subtitles", title: isTr ? "Whisper Перевод RU → EN" : "Whisper Субтитры", subtitle: $("#aiModel").value, input_path: state.studioFile, model: $("#aiModel").value, language: isTr ? "ru" : lv, task: isTr ? "translate" : "transcribe", burn_subtitles: $("#aiBurn").checked, shorts_style: true, whisper_prompt: $("#aiPrompt").value.trim() }));
+      };
+      $("#btnAiCensor").onclick = () => {
+        const lv = $("#aiLang").value;
+        callBackend("runStudioAction", JSON.stringify({ action: "censor", title: "AI Аудио-цензура", subtitle: $("#aiModel").value, input_path: state.studioFile, model: $("#aiModel").value, language: lv === "translate_en" ? "ru" : lv, banned_words: $("#aiBanned").value, censor_beep: $("#aiBeep").checked, whisper_prompt: $("#aiPrompt").value.trim() }));
+      };
+      $("#btnGenYtMeta").onclick = () => callBackend("generateYouTubeMeta", state.studioFile);
+      $("#btnGenDigest").onclick = () => callBackend("generateStreamDigest", state.studioFile);
+      $("#btnCopyYtMeta")?.addEventListener("click", () => { navigator.clipboard?.writeText(`${(state.ytMeta.titles || []).join("\n")}\n\n${state.ytMeta.description || ""}\n\nТеги: ${state.ytMeta.tags || ""}`); showToast("Скопировано", "", "success"); });
+      $("#btnCopyDigest")?.addEventListener("click", () => { navigator.clipboard?.writeText(state.streamDigest); showToast("Скопировано", "", "success"); });
+    } else if (state.studioSub === "thumbnail") {
+      const swatches = ["#8b5cf6", "#ef4444", "#22c55e", "#f59e0b", "#3b82f6", "#ec4899"];
+      host.innerHTML = `
+        <div class="studio-inspector-card">
+          <div class="inspector-group-title"><span>Конструктор обложки 1280×720</span></div>
+          <div style="font-size:12px;color:var(--text-muted);">Перемотайте видео на нужный момент — текст и рамка сразу видны поверх кадра на мониторе!</div>
+          <div class="field"><label>Крупный заголовок</label><input class="input" id="thHeadline" value="${esc(state.studioThumb.headline)}" /></div>
+          <div class="field"><label>Плашка-подзаголовок</label><input class="input" id="thSubtitle" value="${esc(state.studioThumb.subtitle)}" /></div>
+          <div class="form-grid-2">
+            <div class="field"><label>Таймкод кадра</label><input class="input mono" id="thTime" value="${fmtDur(mon?.currentTime || 15)}" /></div>
+            <div class="field"><label>Акцентный цвет</label>
+              <div class="color-swatch-row" style="margin-top:6px;">
+                ${swatches.map((col) => `<button type="button" class="color-swatch ${state.studioThumb.accent === col ? "active" : ""}" data-col="${col}" style="background:${col};"></button>`).join("")}
+              </div>
+            </div>
+          </div>
+          <button class="btn btn-subtle btn-sm" id="btnThSyncNow">${iconSvg("camera", 13)}<span>Взять текущий таймкод с монитора</span></button>
+          <button class="btn btn-primary btn-full" id="btnCreateThumb">${iconSvg("image", 15)}<span>Сохранить обложку .JPG</span></button>
+          ${state.lastThumbPath ? `<img src="${mediaUrl(state.lastThumbPath)}&t=${Date.now()}" style="width:100%;border-radius:10px;border:1px solid var(--border);cursor:pointer;" id="btnRevealThumb" title="Открыть в папке" />` : ""}
+        </div>
+      `;
+      $("#thHeadline").oninput = (e) => { state.studioThumb.headline = e.target.value; syncStudioMonitorOverlays(); };
+      $("#thSubtitle").oninput = (e) => { state.studioThumb.subtitle = e.target.value; syncStudioMonitorOverlays(); };
+      host.querySelectorAll(".color-swatch").forEach((s) => {
+        s.onclick = () => {
+          state.studioThumb.accent = s.dataset.col;
+          host.querySelectorAll(".color-swatch").forEach((x) => x.classList.toggle("active", x === s));
+          syncStudioMonitorOverlays();
+        };
+      });
+      $("#btnThSyncNow").onclick = () => { if (mon && $("#thTime")) $("#thTime").value = fmtDur(mon.currentTime || 0); };
+      $("#btnCreateThumb").onclick = async () => {
+        const raw = await callBackend("createThumbnail", JSON.stringify({
+          video_path: state.studioFile,
+          timestamp_sec: parseSec($("#thTime").value) ?? (mon?.currentTime || 15),
+          headline: state.studioThumb.headline.trim() || "ЛУЧШИЙ МОМЕНТ",
+          subtitle: state.studioThumb.subtitle.trim() || "TWITCH HIGHLIGHTS",
+          accent_color: state.studioThumb.accent,
+        }));
+        try { const res = JSON.parse(raw || "{}"); if (res.ok && res.output_path) { state.lastThumbPath = res.output_path; renderStudioInspector(); } } catch {}
+      };
+      $("#btnRevealThumb")?.addEventListener("click", () => callBackend("openInExplorer", state.lastThumbPath));
+    } else if (state.studioSub === "effects") {
+      const fx = state.studioFx;
+      host.innerHTML = `
+        <div class="studio-inspector-card">
+          <div class="inspector-group-title"><span>Цветокор и Эффекты (Живой предпросмотр)</span><button class="btn btn-subtle btn-sm" id="btnFxReset">Сброс</button></div>
+          <div class="field">
+            <label>Цветовой пресет</label>
+            <div class="split-pills" id="fxPresets">
+              ${[["none", "Оригинал"], ["vibrant", "Яркий YouTube"], ["cinema", "Кино"], ["crisp", "Чёткий HD"]].map(([id, lbl]) =>
+                `<button type="button" class="split-pill ${fx.color_preset === id ? "active" : ""}" data-cp="${id}">${lbl}</button>`
+              ).join("")}
+            </div>
+          </div>
+          <div class="field"><div class="field-head"><label>Яркость</label><span class="mono" id="fxBrV">${fx.brightness.toFixed(2)}</span></div><input type="range" id="fxBr" min="-0.3" max="0.3" step="0.02" value="${fx.brightness}" /></div>
+          <div class="field"><div class="field-head"><label>Контраст</label><span class="mono" id="fxCtV">${fx.contrast.toFixed(2)}</span></div><input type="range" id="fxCt" min="0.7" max="1.5" step="0.02" value="${fx.contrast}" /></div>
+          <div class="field"><div class="field-head"><label>Насыщенность</label><span class="mono" id="fxStV">${fx.saturation.toFixed(2)}</span></div><input type="range" id="fxSt" min="0.5" max="1.8" step="0.02" value="${fx.saturation}" /></div>
+          <div class="form-grid-3" style="gap:8px;">
+            <div class="field"><label>Скорость</label><select class="input-select" id="fxSpd">${[0.5, 0.75, 1, 1.25, 1.5, 2].map((v) => `<option value="${v}" ${fx.speed === v ? "selected" : ""}>${v}×</option>`).join("")}</select></div>
+            <div class="field"><label>Fade In (с)</label><input type="number" class="input mono" id="fxFi" value="${fx.fade_in}" min="0" max="10" step="0.5" /></div>
+            <div class="field"><label>Fade Out (с)</label><input type="number" class="input mono" id="fxFo" value="${fx.fade_out}" min="0" max="10" step="0.5" /></div>
+          </div>
+          <div class="field"><div class="field-head"><label>Громкость звука (дБ)</label><span class="mono" id="fxVolV">${fx.volume_db > 0 ? "+" : ""}${fx.volume_db} дБ</span></div><input type="range" id="fxVol" min="-12" max="12" step="1" value="${fx.volume_db}" /></div>
+          <div class="input-row" style="flex-wrap:wrap;">
+            <label class="switch-inline"><input type="checkbox" id="fxSharp" ${fx.sharpen ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Резкость</span></label>
+            <label class="switch-inline"><input type="checkbox" id="fxDenoise" ${fx.denoise ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Шумодав</span></label>
+            <label class="switch-inline"><input type="checkbox" id="fxVoice" ${fx.voice_enhance ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Голос</span></label>
+            <label class="switch-inline"><input type="checkbox" id="fxNorm" ${fx.normalize_audio ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">EBU R128</span></label>
+          </div>
+          <button class="btn btn-primary btn-full" id="btnApplyFx">${iconSvg("sparkles", 15)}<span>Применить и отрендерить видео</span></button>
+        </div>
+      `;
+      const syncFx = () => {
+        fx.brightness = Number($("#fxBr").value); $("#fxBrV").textContent = fx.brightness.toFixed(2);
+        fx.contrast = Number($("#fxCt").value); $("#fxCtV").textContent = fx.contrast.toFixed(2);
+        fx.saturation = Number($("#fxSt").value); $("#fxStV").textContent = fx.saturation.toFixed(2);
+        fx.volume_db = Number($("#fxVol").value); $("#fxVolV").textContent = `${fx.volume_db > 0 ? "+" : ""}${fx.volume_db} дБ`;
+        syncStudioMonitorOverlays();
+      };
+      ["#fxBr", "#fxCt", "#fxSt", "#fxVol"].forEach((id) => $(id).oninput = syncFx);
+      $("#fxPresets").querySelectorAll(".split-pill").forEach((b) => {
+        b.onclick = () => {
+          fx.color_preset = b.dataset.cp;
+          $("#fxPresets").querySelectorAll(".split-pill").forEach((x) => x.classList.toggle("active", x === b));
+          syncStudioMonitorOverlays();
+        };
+      });
+      $("#btnFxReset").onclick = () => {
+        state.studioFx = { speed: 1, color_preset: "none", brightness: 0, contrast: 1, saturation: 1, sharpen: false, fade_in: 0, fade_out: 0, volume_db: 0, denoise: false, voice_enhance: false, normalize_audio: false };
+        renderStudioInspector();
+        syncStudioMonitorOverlays();
+      };
+      $("#btnApplyFx").onclick = () => {
+        fx.speed = Number($("#fxSpd").value) || 1;
+        fx.fade_in = Number($("#fxFi").value) || 0;
+        fx.fade_out = Number($("#fxFo").value) || 0;
+        fx.sharpen = $("#fxSharp").checked;
+        fx.denoise = $("#fxDenoise").checked;
+        fx.voice_enhance = $("#fxVoice").checked;
+        fx.normalize_audio = $("#fxNorm").checked;
+        const out = appendFileSuffix(state.studioFile, "_fx", ".mp4");
+        callBackend("runStudioAction", JSON.stringify({
+          action: "studio_effects", title: "Эффекты и цветокор", subtitle: fname,
+          params: { input_path: state.studioFile, output_path: out, ...fx }
+        }));
+      };
+    } else if (state.studioSub === "export") {
+      host.innerHTML = `
+        <div class="studio-inspector-card">
+          <div class="inspector-group-title"><span>Экспорт и публикация</span></div>
+          <div class="field">
+            <label>Целевой пресет</label>
+            <select class="input-select" id="expPreset">
+              ${Object.entries(state.exportPresets).map(([id, pr]) => `<option value="${esc(id)}">${esc(pr.label)}</option>`).join("")}
+            </select>
+          </div>
+          <div class="field">
+            <label>Водяной знак (PNG, опционально)</label>
+            <div class="input-row">
+              <input class="input" id="expWmPath" value="${esc(state.config.watermark_path || "")}" placeholder="Логотип в углу..." />
+              <button class="btn btn-subtle btn-sm" id="btnPickWm">${iconSvg("image", 14)}</button>
+            </div>
+          </div>
+          <div class="input-row" style="flex-wrap:wrap;">
+            <label class="switch-inline"><input type="checkbox" id="expNorm" checked/><span class="switch-track"></span><span style="font-size:12px;">Нормализация -14 LUFS</span></label>
+            <label class="switch-inline"><input type="checkbox" id="expVoice"/><span class="switch-track"></span><span style="font-size:12px;">Улучшение голоса</span></label>
+          </div>
+          <button class="btn btn-primary btn-full" id="btnDoExport">${iconSvg("download", 15)}<span>Экспортировать видео</span></button>
+          <div class="form-grid-2" style="gap:8px;border-top:1px solid var(--border);padding-top:10px;">
+            <button class="btn btn-subtle btn-sm" id="btnExtractMp3">${iconSvg("volume", 14)}<span>Скачать MP3</span></button>
+            <button class="btn btn-soft btn-sm" id="btnPubTgNow">${iconSvg("bell", 14)}<span>В Telegram</span></button>
+          </div>
+        </div>
+      `;
+      $("#btnPickWm").onclick = async () => { const p = await callBackend("pickFile", "Картинки PNG/WebP (*.png *.webp *.jpg)"); if (p) $("#expWmPath").value = p; };
+      $("#btnDoExport").onclick = () => {
+        const pid = $("#expPreset").value;
+        callBackend("runStudioAction", JSON.stringify({
+          action: "export_preset", title: `Экспорт (${state.exportPresets[pid]?.label || pid})`, subtitle: fname,
+          params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, `_${pid}`, ".mp4"), preset_id: pid, normalize_audio: $("#expNorm").checked, voice_enhance: $("#expVoice").checked, watermark_path: $("#expWmPath").value.trim() }
+        }));
+      };
+      $("#btnExtractMp3").onclick = () => {
+        callBackend("runStudioAction", JSON.stringify({ action: "extract_audio", title: "Извлечение MP3", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_audio", ".mp3"), format: "mp3" } }));
+      };
+      $("#btnPubTgNow").onclick = () => callBackend("publishVideoToTelegram", state.studioFile, "");
+    }
   }
 
   function renderHeatmapSvg() {
@@ -2608,6 +2906,7 @@
         state.libStats = data?.stats || null;
       }
       if (state.page === "library") renderLibraryGrid();
+      else if (state.page === "studio" && !state.studioFile) renderStudioPage(true);
     } else if (type === "files_dropped") {
       // #49 Native OS Drag & Drop from Finder/Explorer
       const paths = data || [];
@@ -2617,8 +2916,7 @@
         loadBsLocalMedia(first);
         showToast("Файл загружен в Студию блюра", first.split(/[\\/]/).pop(), "success");
       } else if (state.page === "studio") {
-        state.studioFile = first;
-        renderStudioPage();
+        loadStudioVideo(first);
         showToast("Видео открыто в Студии", first.split(/[\\/]/).pop(), "success");
       } else {
         state.manualBlurFile = first;
@@ -2745,7 +3043,7 @@
       // #50 Pro Video Player Keyboard Shortcuts (Space, J/K/L, Left/Right, I/O)
       const activeVid = !$("#playerModal").classList.contains("hidden")
         ? $("#lightboxVideo")
-        : (state.page === "studio" && state.studioSub === "trim" ? $("#trimVideo") : null);
+        : (state.page === "studio" ? $("#studioMonitor") : null);
       if (!activeVid || !activeVid.src) return;
 
       const k = e.key.toLowerCase();
@@ -2764,12 +3062,12 @@
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
         activeVid.currentTime = Math.min(activeVid.duration || 999999, activeVid.currentTime + 5);
-      } else if (k === "i" && activeVid.id === "trimVideo") {
+      } else if (k === "i" && activeVid.id === "studioMonitor") {
         e.preventDefault();
-        if ($("#trimStart")) $("#trimStart").value = fmtDur(activeVid.currentTime);
-      } else if (k === "o" && activeVid.id === "trimVideo") {
+        $("#tlBtnIn")?.click();
+      } else if (k === "o" && activeVid.id === "studioMonitor") {
         e.preventDefault();
-        if ($("#trimEnd")) $("#trimEnd").value = fmtDur(activeVid.currentTime);
+        $("#tlBtnOut")?.click();
       }
     });
 

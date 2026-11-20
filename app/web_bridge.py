@@ -1703,6 +1703,49 @@ class AppBridge(QObject):
                     pass
         return f"# Twitch Recorder Pro v{APP_VERSION}\n\nФайл CHANGELOG.md не найден."
 
+    @Slot(str, result=str)
+    def probeStudioVideo(self, path: str) -> str:
+        if not path or not os.path.exists(path):
+            return json.dumps({"ok": False})
+        self._register_allowed_media_file(path)
+        info = probe_video(path)
+        p = Path(path)
+        markers = []
+        mk_path = p.with_suffix(".markers.json")
+        if mk_path.exists():
+            try:
+                markers = json.loads(mk_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        chat_path = p.with_suffix(".chat.json")
+        return json.dumps({
+            "ok": True,
+            "path": path,
+            "name": p.name,
+            "duration": info.get("duration", 0.0),
+            "width": int(info.get("width", 0)),
+            "height": int(info.get("height", 0)),
+            "fps": info.get("fps", 0.0),
+            "size_bytes": int(info.get("size_bytes", 0)),
+            "size_str": format_bytes(int(info.get("size_bytes", 0))),
+            "markers": markers if isinstance(markers, list) else [],
+            "chat_path": str(chat_path) if chat_path.exists() else "",
+        }, ensure_ascii=False)
+
+    @Slot(str, float, result=str)
+    def saveStudioFrame(self, video_path: str, ts: float) -> str:
+        if not video_path or not os.path.exists(video_path):
+            return json.dumps({"ok": False, "error": "Файл не найден"})
+        src = Path(video_path)
+        out = str(src.with_name(f"{src.stem}_frame_{int(max(0, ts))}s.jpg"))
+        ok, err = extract_frame_from_file(video_path, max(0.0, float(ts)), out)
+        if ok and os.path.exists(out):
+            self._register_allowed_media_file(out)
+            self._toast("Кадр сохранён", Path(out).name, "success")
+            return json.dumps({"ok": True, "path": out})
+        self._toast("Ошибка захвата кадра", err or "Не удалось", "error")
+        return json.dumps({"ok": False, "error": err})
+
     # ------------------------------------------------------------------ #41 Interactive Telegram Bot
     def _sync_telegram_bot(self) -> None:
         should_run = bool(

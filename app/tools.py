@@ -634,7 +634,7 @@ def _has_audio_stream(path: str) -> bool:
 
 def probe_video(path: str) -> Dict[str, float]:
     ffprobe = get_ffprobe_path()
-    info = {"duration": 0.0, "width": 0.0, "height": 0.0, "size_bytes": 0.0}
+    info = {"duration": 0.0, "width": 0.0, "height": 0.0, "fps": 0.0, "size_bytes": 0.0}
     if not os.path.exists(path):
         return info
     info["size_bytes"] = float(os.path.getsize(path))
@@ -644,7 +644,7 @@ def probe_video(path: str) -> Dict[str, float]:
         res = subprocess.run(
             [
                 ffprobe, "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=width,height:format=duration",
+                "-show_entries", "stream=width,height,avg_frame_rate,r_frame_rate:format=duration",
                 "-of", "json", path,
             ],
             capture_output=True, text=True, timeout=10, creationflags=CREATE_NO_WINDOW,
@@ -655,8 +655,16 @@ def probe_video(path: str) -> Dict[str, float]:
             info["duration"] = float(fmt["duration"])
         streams = data.get("streams", [])
         if streams:
-            info["width"] = float(streams[0].get("width", 0))
-            info["height"] = float(streams[0].get("height", 0))
+            st0 = streams[0]
+            info["width"] = float(st0.get("width", 0))
+            info["height"] = float(st0.get("height", 0))
+            fr = str(st0.get("avg_frame_rate") or st0.get("r_frame_rate") or "0/1")
+            if "/" in fr:
+                num, den = fr.split("/", 1)
+                if float(den) > 0:
+                    fps_val = float(num) / float(den)
+                    if 1.0 <= fps_val <= 240.0:
+                        info["fps"] = round(fps_val, 2)
     except Exception:
         pass
     return info
@@ -1189,6 +1197,74 @@ def split_video_by_duration(
         return False, parts, (res.stderr or "Не удалось разбить файл").strip()
     except Exception as exc:
         return False, [], str(exc)
+
+
+def build_studio_effects_filters(
+    speed: float = 1.0,
+    color_preset: str = "none",
+    brightness: float = 0.0,
+    contrast: float = 1.0,
+    saturation: float = 1.0,
+    sharpen: bool = False,
+    fade_in: float = 0.0,
+    fade_out: float = 0.0,
+    total_duration: float = 0.0,
+    volume_db: float = 0.0,
+    denoise: bool = False,
+    voice_enhance: bool = False,
+    normalize_audio: bool = False,
+) -> Tuple[List[str], List[str]]:
+    """Build FFmpeg video and audio filter chains for Studio Effects & Color Grading."""
+    vf: List[str] = []
+    af: List[str] = []
+
+    spd = max(0.5, min(2.0, float(speed or 1.0)))
+    if abs(spd - 1.0) > 0.01:
+        vf.append(f"setpts={1.0 / spd:.5f}*PTS")
+        af.append(f"atempo={spd:.4f}")
+
+    # Color grading presets + custom sliders
+    b = float(brightness or 0.0)
+    c = float(contrast or 1.0)
+    s = float(saturation or 1.0)
+    if color_preset == "vibrant":
+        c *= 1.08
+        s *= 1.24
+        b += 0.02
+    elif color_preset == "cinema":
+        c *= 1.14
+        s *= 0.88
+        b -= 0.02
+    elif color_preset == "crisp":
+        c *= 1.10
+        s *= 1.10
+        sharpen = True
+    if abs(b) > 0.005 or abs(c - 1.0) > 0.01 or abs(s - 1.0) > 0.01:
+        vf.append(f"eq=brightness={b:.3f}:contrast={c:.3f}:saturation={s:.3f}")
+    if sharpen:
+        vf.append("unsharp=5:5:0.75:5:5:0.0")
+
+    eff_dur = (total_duration / spd) if total_duration > 0 else 0.0
+    fi = max(0.0, float(fade_in or 0.0))
+    fo = max(0.0, float(fade_out or 0.0))
+    if fi > 0.05:
+        vf.append(f"fade=t=in:st=0:d={fi:.2f}")
+        af.append(f"afade=t=in:st=0:d={fi:.2f}")
+    if fo > 0.05 and eff_dur > fo + 0.5:
+        fo_st = max(0.0, eff_dur - fo)
+        vf.append(f"fade=t=out:st={fo_st:.2f}:d={fo:.2f}")
+        af.append(f"afade=t=out:st={fo_st:.2f}:d={fo:.2f}")
+
+    if denoise:
+        af.append("afftdn=nf=-25")
+    if voice_enhance:
+        af.extend(["highpass=f=80", "acompressor=threshold=-20dB:ratio=3:attack=10:release=120"])
+    if abs(float(volume_db or 0.0)) > 0.1:
+        af.append(f"volume={float(volume_db):.1f}dB")
+    if normalize_audio:
+        af.append("loudnorm=I=-14:TP=-1.5:LRA=11")
+
+    return vf, af
 
 
 EXPORT_PRESETS = {

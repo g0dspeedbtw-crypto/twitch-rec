@@ -1609,6 +1609,49 @@ class StudioToolWorker(QThread):
                 else:
                     self._emit_done(False, info, "")
 
+            elif self.action == "studio_effects":
+                from app.tools import build_studio_effects_filters
+                inp = self.params["input_path"]
+                out = self.params["output_path"]
+                dur = probe_video(inp).get("duration", 0.0)
+                spd = float(self.params.get("speed", 1.0))
+                vf_list, af_list = build_studio_effects_filters(
+                    speed=spd,
+                    color_preset=self.params.get("color_preset", "none"),
+                    brightness=float(self.params.get("brightness", 0.0)),
+                    contrast=float(self.params.get("contrast", 1.0)),
+                    saturation=float(self.params.get("saturation", 1.0)),
+                    sharpen=bool(self.params.get("sharpen", False)),
+                    fade_in=float(self.params.get("fade_in", 0.0)),
+                    fade_out=float(self.params.get("fade_out", 0.0)),
+                    total_duration=dur,
+                    volume_db=float(self.params.get("volume_db", 0.0)),
+                    denoise=bool(self.params.get("denoise", False)),
+                    voice_enhance=bool(self.params.get("voice_enhance", False)),
+                    normalize_audio=bool(self.params.get("normalize_audio", False)),
+                )
+                cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", inp]
+                if vf_list:
+                    cmd.extend(["-vf", ",".join(vf_list)])
+                cmd.extend(encoder_ffmpeg_args(enc, self.app_config.video_quality))
+                if af_list:
+                    cmd.extend(["-af", ",".join(af_list), "-c:a", "aac", "-b:a", "192k"])
+                else:
+                    cmd.extend(["-c:a", "copy"])
+                cmd.extend(["-movflags", "+faststart", out])
+                eff_dur = (dur / max(0.5, spd)) if dur > 0 else 0.0
+                self.progress_updated.emit(self.job_id, 5.0, f"Применение эффектов ({enc})...")
+                rc, err = self._run_ffmpeg_with_progress(cmd, eff_dur, f"Эффекты ({enc})", timeout=1800)
+                if self._stop_requested:
+                    if os.path.exists(out):
+                        try:
+                            os.remove(out)
+                        except Exception:
+                            pass
+                    self._emit_done(False, "Отменено", "")
+                    return
+                self._emit_done(rc == 0 and os.path.exists(out), out if rc == 0 else err, "Эффекты применены")
+
         except Exception as exc:
             self._emit_done(False, str(exc), "")
 
