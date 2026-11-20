@@ -143,13 +143,31 @@ class LocalMediaServer:
                         self._send_bytes(404, "text/plain", b"Thumb failed")
                     return
 
-                # 3. Local file streaming with HTTP 206 Range support (for <video> and images)
+                # 3. Local file streaming with HTTP 206 Range support (for images & native webm)
                 if path == "/media/file":
                     file_path = qs.get("path", [""])[0]
                     if not file_path or not parent.is_path_allowed(file_path):
                         self._send_bytes(403 if file_path and os.path.isfile(file_path) else 404, "text/plain", b"File not found")
                         return
                     self._serve_file_ranged(file_path)
+                    return
+
+                # 3b. Universal QtWebEngine-compatible WebM (VP8 + Opus) local video streamer
+                # PySide6 QtWebEngine on PyPI is built without proprietary H.264/AAC codecs,
+                # so transcoding on-the-fly to realtime VP8+Opus WebM ensures 100% playback on macOS & Windows.
+                if path == "/media/webm":
+                    file_path = qs.get("path", [""])[0]
+                    if not file_path or not parent.is_path_allowed(file_path):
+                        self._send_bytes(403 if file_path and os.path.isfile(file_path) else 404, "text/plain", b"File not found")
+                        return
+                    try:
+                        ss = max(0.0, float(qs.get("ss", ["0"])[0] or 0.0))
+                    except Exception:
+                        ss = 0.0
+                    if file_path.lower().endswith(".webm") and ss <= 0.1:
+                        self._serve_file_ranged(file_path)
+                    else:
+                        self._serve_file_webm_proxy(file_path, ss)
                     return
 
                 # 4. Static web frontend assets
@@ -223,6 +241,68 @@ class LocalMediaServer:
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                     pass
 
+            def _serve_file_webm_proxy(self, file_path: str, start_sec: float = 0.0) -> None:
+                import subprocess
+                ffmpeg = get_ffmpeg_path()
+                if not ffmpeg:
+                    self._send_bytes(503, "text/plain", b"FFmpeg unavailable")
+                    return
+                ff_args = [
+                    ffmpeg, "-hide_banner", "-loglevel", "error",
+                    "-ss", f"{max(0.0, start_sec):.3f}",
+                    "-i", file_path,
+                    "-map", "0:v:0", "-map", "0:a:0?",
+                    "-vf", "scale='min(1280,iw)':-2",
+                    "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8",
+                    "-threads", "4", "-b:v", "2400k", "-maxrate", "3200k", "-bufsize", "4800k",
+                    "-g", "60", "-pix_fmt", "yuv420p",
+                    "-c:a", "libopus", "-b:a", "96k", "-ac", "2",
+                    "-f", "webm", "pipe:1",
+                ]
+                ff_proc = None
+                try:
+                    ff_proc = subprocess.Popen(
+                        ff_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW
+                    )
+                    assert ff_proc.stdout is not None
+                    first_chunk = ff_proc.stdout.read(16384)
+                    if not first_chunk:
+                        err = b"Failed to decode video"
+                        try:
+                            fe = ff_proc.stderr.read().decode("utf-8", errors="ignore").strip() if ff_proc.stderr else ""
+                            if fe:
+                                err = fe[:240].encode("utf-8", errors="ignore")
+                        except Exception:
+                            pass
+                        self._send_bytes(502, "text/plain; charset=utf-8", err, "no-store")
+                        return
+
+                    self.close_connection = True
+                    self.send_response(200)
+                    self.send_header("Content-Type", "video/webm")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(first_chunk)
+                    self.wfile.flush()
+
+                    while True:
+                        chunk = ff_proc.stdout.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass
+                except Exception:
+                    pass
+                finally:
+                    if ff_proc and ff_proc.poll() is None:
+                        try:
+                            ff_proc.kill()
+                        except Exception:
+                            pass
+
             def _serve_live_stream_proxy(self, stream_url: str, quality: str) -> None:
                 import subprocess
                 sl_cmd = get_streamlink_cmd()
@@ -233,7 +313,7 @@ class LocalMediaServer:
 
                 # Build safe H.264 fallback quality chain so Streamlink never fails if a specific preset is missing
                 raw_quals = [q.strip() for q in (quality or "").split(",") if q.strip()]
-                for fb in ("720p60", "720p", "1080p60", "1080p", "480p", "best"):
+                for fb in ("720p60", "720p", "480p", "1080p60", "1080p", "best"):
                     if fb not in raw_quals:
                         raw_quals.append(fb)
                 qual_chain = ",".join(raw_quals)
@@ -249,22 +329,26 @@ class LocalMediaServer:
                 if cfg is not None:
                     oauth = getattr(cfg, "twitch_oauth_token", "") or ""
                     if oauth and "twitch.tv" in stream_url.lower():
-                        sl_args.append(f"--twitch-api-header=Authorization=OAuth {oauth}")
+                        tok = oauth.strip()
+                        tok = tok[6:] if tok.lower().startswith("oauth:") else tok
+                        sl_args.append(f"--twitch-api-header=Authorization=OAuth {tok}")
                     proxy = getattr(cfg, "proxy_url", "") or ""
                     if proxy:
                         sl_args.extend(["--http-proxy", proxy])
                 sl_args.extend([stream_url, qual_chain])
 
+                # Encode live stream to WebM (VP8 + Opus) so PySide6 QtWebEngine plays it natively without H.264/AAC!
                 ff_args = [
                     ffmpeg, "-hide_banner", "-loglevel", "error",
                     "-fflags", "+genpts+discardcorrupt+nobuffer",
                     "-i", "pipe:0",
                     "-map", "0:v:0", "-map", "0:a:0?",
-                    "-c:v", "copy",
-                    "-c:a", "aac", "-b:a", "128k", "-ac", "2",
-                    "-f", "mp4",
-                    "-movflags", "+frag_keyframe+empty_moov+default_base_moof+faststart",
-                    "pipe:1",
+                    "-vf", "scale='min(1280,iw)':-2",
+                    "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8",
+                    "-threads", "4", "-b:v", "2200k", "-maxrate", "2800k", "-bufsize", "4000k",
+                    "-g", "60", "-pix_fmt", "yuv420p",
+                    "-c:a", "libopus", "-b:a", "96k", "-ac", "2",
+                    "-f", "webm", "pipe:1",
                 ]
                 sl_proc = None
                 ff_proc = None
@@ -279,8 +363,7 @@ class LocalMediaServer:
                     if sl_proc.stdout:
                         sl_proc.stdout.close()
                     assert ff_proc.stdout is not None
-                    # Wait for first valid fragmented MP4 chunk before sending 200 OK
-                    first_chunk = ff_proc.stdout.read(32768)
+                    first_chunk = ff_proc.stdout.read(16384)
                     if not first_chunk:
                         err_msg = b"Stream offline or failed to start"
                         try:
@@ -296,7 +379,7 @@ class LocalMediaServer:
 
                     self.close_connection = True
                     self.send_response(200)
-                    self.send_header("Content-Type", "video/mp4")
+                    self.send_header("Content-Type", "video/webm")
                     self.send_header("Cache-Control", "no-store")
                     self.send_header("Connection", "close")
                     self.end_headers()

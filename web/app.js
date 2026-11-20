@@ -35,6 +35,7 @@
     studioIn: 0,
     studioOut: 60,
     studioTime: 0,
+    studioSeekOffset: 0,
     studioSpeed: 1,
     studioFx: { speed: 1, color_preset: "none", brightness: 0, contrast: 1, saturation: 1, sharpen: false, fade_in: 0, fade_out: 0, volume_db: 0, denoise: false, voice_enhance: false, normalize_audio: false },
     studioThumb: { headline: "ЛУЧШИЙ МОМЕНТ СТРИМА", subtitle: "TWITCH HIGHLIGHTS", accent: "#8b5cf6" },
@@ -98,6 +99,7 @@
     return isNaN(n) ? null : n;
   };
   const mediaUrl = (path) => `/media/file?path=${encodeURIComponent(path)}`;
+  const videoPlayUrl = (path, ss = 0) => `/media/webm?path=${encodeURIComponent(path)}&ss=${Math.max(0, Number(ss) || 0).toFixed(2)}`;
   const thumbUrl = (path) => `/media/thumb?path=${encodeURIComponent(path)}`;
 
   function showToast(title, message = "", level = "info") {
@@ -849,10 +851,40 @@
   let _studioTlMoveHandler = null;
   let _studioTlUpHandler = null;
 
+  function getStudioDuration() {
+    const mon = $("#studioMonitor");
+    const mDur = Number(state.studioMeta?.duration || 0);
+    const vDur = (mon && isFinite(mon.duration) && mon.duration > 0) ? mon.duration : 0;
+    return Math.max(1, mDur || vDur || 60);
+  }
+
+  function getStudioTime() {
+    const mon = $("#studioMonitor");
+    return Math.max(0, (state.studioSeekOffset || 0) + (mon ? (mon.currentTime || 0) : 0));
+  }
+
+  function seekStudioMonitor(targetSec, autoplay = true) {
+    const mon = $("#studioMonitor");
+    if (!mon || !state.studioFile) return;
+    const dur = getStudioDuration();
+    const clamped = Math.max(0, Math.min(dur, Number(targetSec) || 0));
+    state.studioSeekOffset = clamped;
+    state.studioTime = clamped;
+    const tc = $("#stTimecode");
+    if (tc) tc.textContent = `${fmtDur(clamped)} / ${fmtDur(dur)}`;
+    const ph = $("#tlPlayhead");
+    if (ph && dur > 0) ph.style.left = `${Math.min(100, Math.max(0, (clamped / dur) * 100))}%`;
+    mon.src = videoPlayUrl(state.studioFile, clamped);
+    mon.playbackRate = state.studioSpeed || 1;
+    mon.load();
+    if (autoplay) mon.play().catch(() => {});
+  }
+
   async function loadStudioVideo(path) {
     if (!path) return;
     state.studioFile = path;
     state.studioTime = 0;
+    state.studioSeekOffset = 0;
     state.studioMeta = null;
     state.multiCutSegments = [];
     renderStudioPage();
@@ -990,7 +1022,7 @@
         <div class="studio-stage-col">
           <div class="studio-monitor-card">
             <div class="studio-monitor-screen">
-              <video id="studioMonitor" src="${mediaUrl(state.studioFile)}" playsinline preload="metadata"></video>
+              <video id="studioMonitor" src="${videoPlayUrl(state.studioFile, state.studioSeekOffset || 0)}" playsinline autoplay muted></video>
               <div class="monitor-shorts-guide hidden" id="monShortsGuide"><span>SHORTS 9:16</span></div>
               <div class="monitor-thumb-preview hidden" id="monThumbPreview">
                 <span class="monitor-thumb-pill" id="monThumbSub"></span>
@@ -1071,6 +1103,7 @@
 
     const mon = $("#studioMonitor");
     mon.playbackRate = state.studioSpeed;
+    mon.muted = false;
     const syncPlayBtn = () => {
       const b = $("#stBtnPlay");
       if (b) b.innerHTML = iconSvg(mon.paused ? "play" : "pause", 14);
@@ -1078,24 +1111,25 @@
     mon.onplay = syncPlayBtn;
     mon.onpause = syncPlayBtn;
     mon.onloadedmetadata = () => {
-      if (!state.studioMeta) state.studioMeta = { duration: mon.duration };
-      else if (!state.studioMeta.duration) state.studioMeta.duration = mon.duration;
-      if (state.studioOut > mon.duration || state.studioOut <= 0) state.studioOut = mon.duration;
+      if (isFinite(mon.duration) && mon.duration > 0) {
+        if (!state.studioMeta) state.studioMeta = { duration: mon.duration };
+        else if (!state.studioMeta.duration) state.studioMeta.duration = mon.duration;
+      }
       renderStudioTimelineUI();
     };
     mon.ontimeupdate = () => {
-      state.studioTime = mon.currentTime || 0;
-      const dur = mon.duration || state.studioMeta?.duration || 0;
+      const dur = getStudioDuration();
+      state.studioTime = Math.min(dur, getStudioTime());
       const tc = $("#stTimecode");
       if (tc) tc.textContent = `${fmtDur(state.studioTime)} / ${fmtDur(dur)}`;
       const ph = $("#tlPlayhead");
       if (ph && dur > 0) ph.style.left = `${Math.min(100, Math.max(0, (state.studioTime / dur) * 100))}%`;
     };
-    $("#stBtnPlay").onclick = () => { if (mon.paused) mon.play(); else mon.pause(); };
-    $("#stBtnBack5").onclick = () => { mon.currentTime = Math.max(0, mon.currentTime - 5); };
-    $("#stBtnFwd5").onclick = () => { mon.currentTime = Math.min(mon.duration || 999999, mon.currentTime + 5); };
-    $("#stBtnFrameB").onclick = () => { mon.pause(); mon.currentTime = Math.max(0, mon.currentTime - (1 / 30)); };
-    $("#stBtnFrameF").onclick = () => { mon.pause(); mon.currentTime = Math.min(mon.duration || 999999, mon.currentTime + (1 / 30)); };
+    $("#stBtnPlay").onclick = () => { if (mon.paused) mon.play().catch(() => {}); else mon.pause(); };
+    $("#stBtnBack5").onclick = () => seekStudioMonitor(getStudioTime() - 5, !mon.paused);
+    $("#stBtnFwd5").onclick = () => seekStudioMonitor(getStudioTime() + 5, !mon.paused);
+    $("#stBtnFrameB").onclick = () => seekStudioMonitor(getStudioTime() - 0.5, false);
+    $("#stBtnFrameF").onclick = () => seekStudioMonitor(getStudioTime() + 0.5, false);
     $("#stSpeedSeg").querySelectorAll("button").forEach((b) => {
       b.onclick = () => {
         state.studioSpeed = Number(b.dataset.spd) || 1;
@@ -1103,20 +1137,20 @@
         $("#stSpeedSeg").querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
       };
     });
-    $("#stBtnSnap").onclick = () => callBackend("saveStudioFrame", state.studioFile, mon.currentTime || 0);
+    $("#stBtnSnap").onclick = () => callBackend("saveStudioFrame", state.studioFile, getStudioTime());
     $("#stBtnUseThumb").onclick = () => {
       state.studioSub = "thumbnail";
       updateStudioToolTabsUI();
       renderStudioInspector();
       syncStudioMonitorOverlays();
-      if ($("#thTime")) $("#thTime").value = fmtDur(mon.currentTime || 0);
+      if ($("#thTime")) $("#thTime").value = fmtDur(getStudioTime());
     };
 
     const track = $("#tlTrack");
     let tlDrag = null;
     const xToTime = (clientX) => {
       const rect = track.getBoundingClientRect();
-      const dur = mon.duration || state.studioMeta?.duration || 60;
+      const dur = getStudioDuration();
       const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
       return ratio * dur;
     };
@@ -1126,39 +1160,39 @@
       else if (e.target.id === "tlHandleR") tlDrag = "out";
       else {
         tlDrag = "seek";
-        mon.currentTime = xToTime(e.clientX);
+        seekStudioMonitor(xToTime(e.clientX), true);
       }
     });
     const onTlMove = (e) => {
       if (!tlDrag) return;
       if (!$("#tlTrack")) { tlDrag = null; return; }
       const t = xToTime(e.clientX);
-      const dur = mon.duration || state.studioMeta?.duration || 60;
+      const dur = getStudioDuration();
       if (tlDrag === "in") {
         state.studioIn = Math.max(0, Math.min(state.studioOut - 0.5, t));
-        mon.currentTime = state.studioIn;
         renderStudioTimelineUI();
       } else if (tlDrag === "out") {
         state.studioOut = Math.min(dur, Math.max(state.studioIn + 0.5, t));
-        mon.currentTime = state.studioOut;
         renderStudioTimelineUI();
-      } else if (tlDrag === "seek") {
-        mon.currentTime = t;
       }
     };
     if (_studioTlMoveHandler) window.removeEventListener("mousemove", _studioTlMoveHandler);
     if (_studioTlUpHandler) window.removeEventListener("mouseup", _studioTlUpHandler);
     _studioTlMoveHandler = onTlMove;
-    _studioTlUpHandler = () => { tlDrag = null; };
+    _studioTlUpHandler = () => {
+      if (tlDrag === "in") seekStudioMonitor(state.studioIn, false);
+      else if (tlDrag === "out") seekStudioMonitor(state.studioOut, false);
+      tlDrag = null;
+    };
     window.addEventListener("mousemove", _studioTlMoveHandler);
     window.addEventListener("mouseup", _studioTlUpHandler);
 
     $("#tlBtnIn").onclick = () => {
-      state.studioIn = Math.min(mon.currentTime || 0, Math.max(0, state.studioOut - 0.5));
+      state.studioIn = Math.min(getStudioTime(), Math.max(0, state.studioOut - 0.5));
       renderStudioTimelineUI();
     };
     $("#tlBtnOut").onclick = () => {
-      state.studioOut = Math.max(mon.currentTime || 0, state.studioIn + 0.5);
+      state.studioOut = Math.max(getStudioTime(), state.studioIn + 0.5);
       renderStudioTimelineUI();
     };
     $("#tlBtnAddSeg").onclick = () => {
@@ -1260,7 +1294,7 @@
       pinsEl.querySelectorAll(".tl-pin").forEach((el) => {
         el.onclick = (e) => {
           e.stopPropagation();
-          if (mon) mon.currentTime = Number(el.dataset.t) || 0;
+          seekStudioMonitor(Number(el.dataset.t) || 0, true);
         };
       });
     }
@@ -1505,7 +1539,7 @@
         const assPath = baseChat.endsWith(".chat.json") ? baseChat.replace(/\.chat\.json$/, ".chat.ass") : appendFileSuffix(baseChat, "", ".chat.ass");
         callBackend("runStudioAction", JSON.stringify({ action: "burn_chat", title: "Наложение чата", subtitle: fname, params: { input_path: state.studioFile, ass_path: assPath, output_path: appendFileSuffix(state.studioFile, "_with_chat") } }));
       };
-      host.querySelectorAll(".act-jump-hl").forEach((el) => { el.onclick = () => { if (mon) mon.currentTime = Number(el.dataset.ts) || 0; }; });
+      host.querySelectorAll(".act-jump-hl").forEach((el) => { el.onclick = () => seekStudioMonitor(Number(el.dataset.ts) || 0, true); });
       host.querySelectorAll(".act-cut-hl").forEach((b) => {
         b.onclick = () => {
           const t = Number(b.dataset.ts);
@@ -1607,7 +1641,7 @@
       });
       $("#btnFindViral")?.addEventListener("click", () => { callBackend("runAiSuiteTask", "viral_clips", JSON.stringify({ video_path: state.studioFile, chat_path: state.studioChatFile })); showToast("AI Вирусные клипы", "Анализируем стрим...", "info"); });
       $("#btnAutoMontage")?.addEventListener("click", () => { callBackend("runStudioAction", JSON.stringify({ action: "auto_montage", title: "AI Авто-монтаж «Лучшее за стрим»", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_best_of", ".mp4"), clips: state.aiViralClips, chat_path: state.studioChatFile } })); });
-      host.querySelectorAll(".act-vjump").forEach((el) => { el.onclick = () => { if (mon) mon.currentTime = Number(el.dataset.ts) || 0; }; });
+      host.querySelectorAll(".act-vjump").forEach((el) => { el.onclick = () => seekStudioMonitor(Number(el.dataset.ts) || 0, true); });
       host.querySelectorAll(".act-vshort").forEach((b) => {
         b.onclick = () => {
           const c = state.aiViralClips[Number(b.dataset.idx)];
@@ -1644,7 +1678,7 @@
       });
       $("#btnBanShield")?.addEventListener("click", () => { callBackend("runAiSuiteTask", "ban_shield", JSON.stringify({ video_path: state.studioFile, banned_words: $("#aiBanned").value, model: $("#aiModel").value })); showToast("AI Ban-Word Shield", "Сканируем речь на бан-ворды...", "info"); });
       $("#btnAiDubEn")?.addEventListener("click", () => { callBackend("runStudioAction", JSON.stringify({ action: "ai_dub", title: "AI Дубляж (EN)", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_dub_en", ".mp4"), target_lang: "en" } })); });
-      host.querySelectorAll(".act-bjump").forEach((el) => { el.onclick = () => { if (mon) mon.currentTime = Number(el.dataset.ts) || 0; }; });
+      host.querySelectorAll(".act-bjump").forEach((el) => { el.onclick = () => seekStudioMonitor(Number(el.dataset.ts) || 0, true); });
       $("#btnAiChapters")?.addEventListener("click", () => callBackend("runAiSuiteTask", "chapters", JSON.stringify({ video_path: state.studioFile })));
       $("#btnGenYtMeta")?.addEventListener("click", () => callBackend("generateYouTubeMeta", state.studioFile));
       $("#btnGenDigest")?.addEventListener("click", () => callBackend("generateStreamDigest", state.studioFile));
@@ -1693,7 +1727,7 @@
       `;
       $("#btnBestFrames").onclick = () => { callBackend("runAiSuiteTask", "best_frames", JSON.stringify({ video_path: state.studioFile })); showToast("AI Подбор кадров", "Ищем 5 самых чётких и эмоциональных кадров...", "info"); };
       $("#btnVisionIdeas").onclick = () => { callBackend("runAiSuiteTask", "vision_thumb", JSON.stringify({ video_path: state.studioFile, ts: mon?.currentTime || 15 })); showToast("AI Vision", "Анализируем кадр и генерируем заголовки...", "info"); };
-      host.querySelectorAll(".act-bf-pick").forEach((img) => { img.onclick = () => { const ts = Number(img.dataset.ts) || 0; if (mon) mon.currentTime = ts; if ($("#thTime")) $("#thTime").value = fmtDur(ts); }; });
+      host.querySelectorAll(".act-bf-pick").forEach((img) => { img.onclick = () => { const ts = Number(img.dataset.ts) || 0; seekStudioMonitor(ts, false); if ($("#thTime")) $("#thTime").value = fmtDur(ts); }; });
       host.querySelectorAll(".act-idea-pick").forEach((b) => {
         b.onclick = () => {
           const it = state.aiThumbIdeas[Number(b.dataset.idx)];
@@ -2407,10 +2441,20 @@
       img.classList.remove("hidden");
       empty.classList.add("hidden");
     } else if (type === "video" && path) {
-      vid.src = mediaUrl(path);
+      bs.seekOffset = 0;
+      bs.duration = 0;
+      vid.src = videoPlayUrl(path, 0);
       vid.classList.remove("hidden");
       bar.classList.remove("hidden");
       empty.classList.add("hidden");
+      vid.load();
+      vid.play().catch(() => {});
+      callBackend("probeStudioVideo", path).then((raw) => {
+        try {
+          const m = JSON.parse(raw || "{}");
+          if (m.ok && m.duration > 0) bs.duration = m.duration;
+        } catch {}
+      });
     }
   }
 
@@ -2616,12 +2660,22 @@
       else { vid.pause(); $("#bsPlayBtn").innerHTML = iconSvg("play", 16); }
     };
     vid.ontimeupdate = () => {
-      if (!vid.duration) return;
-      $("#bsScrubber").value = (vid.currentTime / vid.duration) * 100;
-      $("#bsTimeLbl").textContent = `${fmtDur(vid.currentTime)} / ${fmtDur(vid.duration)}`;
+      const dur = bs.duration || (isFinite(vid.duration) ? vid.duration : 0);
+      const cur = (bs.seekOffset || 0) + (vid.currentTime || 0);
+      if (dur > 0 && document.activeElement !== $("#bsScrubber")) {
+        $("#bsScrubber").value = Math.min(100, (cur / dur) * 100);
+      }
+      $("#bsTimeLbl").textContent = `${fmtDur(cur)} / ${fmtDur(dur)}`;
     };
-    $("#bsScrubber").oninput = (e) => {
-      if (vid.duration) vid.currentTime = (Number(e.target.value) / 100) * vid.duration;
+    $("#bsScrubber").onchange = (e) => {
+      const dur = bs.duration || (isFinite(vid.duration) ? vid.duration : 0);
+      if (dur > 0 && bs.mediaPath) {
+        const target = (Number(e.target.value) / 100) * dur;
+        bs.seekOffset = target;
+        vid.src = videoPlayUrl(bs.mediaPath, target);
+        vid.load();
+        vid.play().catch(() => {});
+      }
     };
 
     // Inspector bindings
@@ -2666,7 +2720,7 @@
     $("#bsSaveTpl").onclick = async () => {
       const r = bs.regions[bs.selected];
       if (!r || !bs.mediaPath) return showToast("Нужен кадр", "Сначала загрузите кадр со стрима или видео", "error");
-      const currentTs = bs.mediaType === "video" ? (Number(vid.currentTime) || 0) : 0;
+      const currentTs = bs.mediaType === "video" ? ((bs.seekOffset || 0) + (Number(vid.currentTime) || 0)) : 0;
       const raw = await callBackend("captureBannerTemplate", bs.mediaPath, JSON.stringify(r), currentTs);
       const res = JSON.parse(raw || "{}");
       if (res.ok) {
@@ -2904,26 +2958,90 @@
     $("#playerModal").classList.remove("hidden");
   }
 
+  let _lbPath = "";
+  let _lbDur = 0;
+  let _lbOffset = 0;
+
+  function seekLightbox(sec) {
+    if (!_lbPath) return;
+    const v = $("#lightboxVideo");
+    const clamped = Math.max(0, Math.min(_lbDur || 999999, Number(sec) || 0));
+    _lbOffset = clamped;
+    v.src = videoPlayUrl(_lbPath, clamped);
+    v.load();
+    v.play().catch(() => {});
+  }
+
   function openLightboxPlayer(path, name, markers = []) {
     _lastLivePlayerCh = null;
-    $("#playerOverlay")?.classList.add("hidden");
+    _lbPath = path;
+    _lbOffset = 0;
+    _lbDur = 0;
     $("#playerTitle").textContent = name || path;
     const v = $("#lightboxVideo");
-    v.onplaying = null;
-    v.oncanplay = null;
-    v.onerror = null;
-    v.src = mediaUrl(path);
+    const ov = $("#playerOverlay");
+    const sp = $("#playerSpinner");
+    const txt = $("#playerOverlayText");
+    const retryBtn = $("#btnPlayerRetry");
+    ov?.classList.remove("hidden");
+    sp?.classList.remove("hidden");
+    retryBtn?.classList.add("hidden");
+    if (txt) txt.textContent = "Загрузка видео...";
+
+    v.onplaying = () => { ov?.classList.add("hidden"); };
+    v.oncanplay = () => { ov?.classList.add("hidden"); v.play().catch(() => {}); };
+    v.onerror = () => {
+      if ($("#playerModal").classList.contains("hidden")) return;
+      sp?.classList.add("hidden");
+      if (txt) txt.textContent = "Не удалось открыть видео. Попробуйте повторить или открыть во внешнем плеере.";
+      retryBtn?.classList.remove("hidden");
+    };
+    if (retryBtn) retryBtn.onclick = () => seekLightbox(_lbOffset);
+
+    v.src = videoPlayUrl(path, 0);
+    v.load();
+    v.play().catch(() => {});
+
     const row = $("#playerMarkersRow");
     if (row) {
       const mkHtml = (markers || []).map((m) =>
         `<button class="btn btn-soft btn-sm act-seek-mk" data-t="${Number(m.t) || 0}">${fmtDur(m.t)} · ${esc(m.note || "Маркер")}</button>`
       ).join("");
-      row.innerHTML = (mkHtml ? `<span style="font-weight:600;color:var(--text-primary);">Маркеры:</span> ${mkHtml}` : "")
-        + `<span style="margin-left:auto;">Хоткеи: <kbd>Space</kbd> пауза · <kbd>J</kbd>/<kbd>L</kbd> ±10с · <kbd>←</kbd>/<kbd>→</kbd> ±5с</span>`;
+      row.innerHTML = `
+        <div class="input-row" style="width:100%;gap:10px;margin-bottom:${mkHtml ? "6px" : "0"};">
+          <span class="mono" id="lbTimeLbl" style="font-size:12px;color:var(--text-primary);">00:00 / --:--</span>
+          <input type="range" id="lbSeekSlider" min="0" max="100" step="0.2" value="0" style="flex:1;" />
+          <button class="btn btn-subtle btn-sm" id="lbOpenExt" title="Открыть в системном плеере">Внешний плеер</button>
+        </div>
+        ${mkHtml ? `<div class="input-row" style="width:100%;flex-wrap:wrap;gap:6px;"><span style="font-weight:600;color:var(--text-primary);">Маркеры:</span> ${mkHtml}</div>` : ""}
+      `;
       row.querySelectorAll(".act-seek-mk").forEach((b) => {
-        b.onclick = () => { v.currentTime = Number(b.dataset.t) || 0; v.play(); };
+        b.onclick = () => seekLightbox(Number(b.dataset.t) || 0);
       });
+      $("#lbOpenExt").onclick = () => callBackend("openExternalPlayer", path);
+      const sl = $("#lbSeekSlider");
+      sl.onchange = (e) => { if (_lbDur > 0) seekLightbox((Number(e.target.value) / 100) * _lbDur); };
+      v.ontimeupdate = () => {
+        const cur = _lbOffset + (v.currentTime || 0);
+        const lbl = $("#lbTimeLbl");
+        if (lbl) lbl.textContent = `${fmtDur(cur)} / ${fmtDur(_lbDur)}`;
+        if (sl && _lbDur > 0 && document.activeElement !== sl) {
+          sl.value = Math.min(100, (cur / _lbDur) * 100);
+        }
+      };
     }
+
+    callBackend("probeStudioVideo", path).then((raw) => {
+      try {
+        const m = JSON.parse(raw || "{}");
+        if (m.ok && m.duration > 0) {
+          _lbDur = m.duration;
+          const lbl = $("#lbTimeLbl");
+          if (lbl) lbl.textContent = `${fmtDur(_lbOffset)} / ${fmtDur(_lbDur)}`;
+        }
+      } catch {}
+    });
+
     $("#playerModal").classList.remove("hidden");
   }
 
@@ -3267,21 +3385,25 @@
       if (!activeVid || !activeVid.src) return;
 
       const k = e.key.toLowerCase();
+      const doSeek = (delta) => {
+        if (activeVid.id === "studioMonitor") seekStudioMonitor(getStudioTime() + delta, !activeVid.paused);
+        else if (activeVid.id === "lightboxVideo" && _lbPath) seekLightbox(_lbOffset + (activeVid.currentTime || 0) + delta);
+      };
       if (e.code === "Space" || k === "k") {
         e.preventDefault();
-        if (activeVid.paused) activeVid.play(); else activeVid.pause();
+        if (activeVid.paused) activeVid.play().catch(() => {}); else activeVid.pause();
       } else if (k === "j") {
         e.preventDefault();
-        activeVid.currentTime = Math.max(0, activeVid.currentTime - 10);
+        doSeek(-10);
       } else if (k === "l") {
         e.preventDefault();
-        activeVid.currentTime = Math.min(activeVid.duration || 999999, activeVid.currentTime + 10);
+        doSeek(10);
       } else if (e.key === "ArrowLeft") {
         e.preventDefault();
-        activeVid.currentTime = Math.max(0, activeVid.currentTime - 5);
+        doSeek(-5);
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
-        activeVid.currentTime = Math.min(activeVid.duration || 999999, activeVid.currentTime + 5);
+        doSeek(5);
       } else if (k === "i" && activeVid.id === "studioMonitor") {
         e.preventDefault();
         $("#tlBtnIn")?.click();

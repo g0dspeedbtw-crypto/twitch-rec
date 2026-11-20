@@ -1275,6 +1275,38 @@ def build_studio_effects_filters(
     return vf, af
 
 
+def cut_video_segments(
+    input_path: str,
+    keep_segments: List[Tuple[float, float]],
+    output_path: str,
+    encoder: str = "auto",
+    video_quality: int = 19,
+) -> Tuple[bool, str]:
+    """Cut and concatenate multiple (start_sec, end_sec) keep segments into output_path."""
+    if not keep_segments:
+        return False, "Нет отрезков для сохранения"
+    tmp_dir = Path(tempfile.gettempdir()) / f"tr_cuts_{os.getpid()}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    part_files: List[str] = []
+    try:
+        for i, (s, e) in enumerate(keep_segments):
+            if e <= s + 0.1:
+                continue
+            pf = str(tmp_dir / f"seg_{i:04d}.mp4")
+            ok, _ = trim_video_fast(
+                input_path, float(s), float(e), pf,
+                accurate_reencode=True, encoder=encoder, quality=video_quality,
+            )
+            if ok and os.path.exists(pf):
+                part_files.append(pf)
+        if not part_files:
+            return False, "Не удалось нарезать фрагменты"
+        ok_cat, msg = concat_videos(part_files, output_path, normalize_clips=False)
+        return ok_cat, output_path if ok_cat else msg
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 EXPORT_PRESETS = {
     "youtube_1080p60": {"label": "YouTube 1080p60 (высокое качество)", "max_mb": None, "height": 1080, "fps": 60, "cq": 19, "audio_kbps": 192},
     "telegram_50mb": {"label": "Telegram — до 50 МБ", "max_mb": 48, "height": 720, "fps": 30, "cq": 25, "audio_kbps": 128},
