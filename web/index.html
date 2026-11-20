@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Twitch Recorder Pro</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="/qwebchannel.js"></script>
+</head>
+<body>
+  <div class="ambient-glow"></div>
+
+  <div class="app-shell">
+    <!-- ==================== LEFT SIDEBAR ==================== -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo">
+          <svg viewBox="0 0 64 64" width="32" height="32">
+            <defs>
+              <linearGradient id="brandGrad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#A78BFA"/>
+                <stop offset="100%" stop-color="#6D28D9"/>
+              </linearGradient>
+            </defs>
+            <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#brandGrad)"/>
+            <rect x="15" y="18" width="25" height="28" rx="6" fill="none" stroke="#FFF" stroke-width="3.6"/>
+            <polygon points="41,26 52,19 52,45 41,38" fill="#FFF"/>
+            <circle cx="27.5" cy="32" r="5" fill="#FF4D4F"/>
+          </svg>
+        </div>
+        <div class="brand-meta">
+          <div class="brand-title">Twitch Recorder</div>
+          <div class="brand-sub">Studio Suite · Pro</div>
+        </div>
+      </div>
+
+      <button class="cmd-trigger" id="btnOpenCmd" title="Быстрый поиск команд (Ctrl+K / Cmd+K)">
+        <span class="cmd-left"><i data-icon="search"></i><span>Быстрый поиск...</span></span>
+        <kbd id="cmdShortcutKbd">Ctrl K</kbd>
+      </button>
+
+      <nav class="nav-scroll">
+        <div class="nav-group-label">ЗАПИСЬ</div>
+        <button class="nav-item active" data-page="live">
+          <span class="nav-ico"><i data-icon="radio"></i></span>
+          <span class="nav-label">Прямые эфиры</span>
+          <span class="nav-badge danger hidden" id="badgeRec">0</span>
+        </button>
+        <button class="nav-item" data-page="vod">
+          <span class="nav-ico"><i data-icon="film"></i></span>
+          <span class="nav-label">VOD и Клипы</span>
+          <span class="nav-badge hidden" id="badgeVod">0</span>
+        </button>
+        <button class="nav-item" data-page="library">
+          <span class="nav-ico"><i data-icon="grid"></i></span>
+          <span class="nav-label">Библиотека</span>
+        </button>
+
+        <div class="nav-group-label">ОБРАБОТКА</div>
+        <button class="nav-item" data-page="blur">
+          <span class="nav-ico"><i data-icon="blur"></i></span>
+          <span class="nav-label">Блюр и Очередь</span>
+          <span class="nav-badge hidden" id="badgeBlur">0</span>
+        </button>
+        <button class="nav-item" data-page="studio">
+          <span class="nav-ico"><i data-icon="scissors"></i></span>
+          <span class="nav-label">Монтаж и AI</span>
+          <span class="nav-badge hidden" id="badgeStudio">0</span>
+        </button>
+
+        <div class="nav-group-label">СИСТЕМА</div>
+        <button class="nav-item" data-page="settings">
+          <span class="nav-ico"><i data-icon="sliders"></i></span>
+          <span class="nav-label">Настройки</span>
+        </button>
+        <button class="nav-item" data-page="logs">
+          <span class="nav-ico"><i data-icon="terminal"></i></span>
+          <span class="nav-label">Журнал</span>
+        </button>
+      </nav>
+
+      <!-- Cloud Update Banner (shown automatically when a new GitHub Release is found) -->
+      <div class="update-banner hidden" id="updateBanner">
+        <div class="upd-head">
+          <span class="upd-badge" id="updBadge">ОБНОВЛЕНИЕ</span>
+          <span class="upd-ver" id="updVer">v2.1.0</span>
+        </div>
+        <div class="upd-text" id="updText">Доступна новая версия</div>
+        <div class="prog-track hidden" id="updProgWrap"><div class="prog-fill" id="updProgBar" style="width:0%"></div></div>
+        <div class="upd-actions">
+          <button class="btn btn-primary btn-sm btn-full" id="btnSidebarUpdate">Обновить</button>
+        </div>
+      </div>
+
+      <!-- Live Telemetry & Resources Card -->
+      <div class="telemetry-card">
+        <div class="tel-header">
+          <span class="tel-dot online"></span>
+          <span class="tel-gpu-label" id="telGpuLabel">GPU NVENC готов</span>
+        </div>
+        <div class="sparkline-wrap">
+          <svg id="sparklineSvg" viewBox="0 0 200 34" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#8B5CF6" stop-opacity="0.38"/>
+                <stop offset="100%" stop-color="#8B5CF6" stop-opacity="0.0"/>
+              </linearGradient>
+            </defs>
+            <path id="sparkArea" fill="url(#sparkFill)" d=""/>
+            <path id="sparkLine" fill="none" stroke="#A78BFA" stroke-width="1.8" d=""/>
+          </svg>
+        </div>
+        <div class="tel-metrics">
+          <span id="telCpu">CPU —</span>
+          <span id="telGpu">GPU —</span>
+        </div>
+        <div class="disk-row">
+          <span id="telDisk">Диск: —</span>
+        </div>
+        <div class="disk-bar"><div class="disk-bar-fill" id="telDiskBar" style="width: 30%"></div></div>
+        <button class="btn btn-subtle btn-full" id="btnOpenFolder">
+          <i data-icon="folder"></i><span>Папка записей</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- ==================== MAIN CONTENT ==================== -->
+    <main class="main-content" id="mainScroll">
+      <!-- Page 1: LIVE STREAMS -->
+      <section class="page active" id="page-live"></section>
+
+      <!-- Page 2: VOD & CLIPS -->
+      <section class="page" id="page-vod"></section>
+
+      <!-- Page 3: LIBRARY -->
+      <section class="page" id="page-library"></section>
+
+      <!-- Page 4: BLUR & GPU QUEUE -->
+      <section class="page" id="page-blur"></section>
+
+      <!-- Page 5: STUDIO & AI -->
+      <section class="page" id="page-studio"></section>
+
+      <!-- Page 6: SETTINGS -->
+      <section class="page" id="page-settings"></section>
+
+      <!-- Page 7: LOGS -->
+      <section class="page" id="page-logs"></section>
+    </main>
+  </div>
+
+  <!-- ==================== FULLSCREEN BLUR STUDIO MODAL ==================== -->
+  <div class="modal-backdrop hidden" id="blurModal">
+    <div class="blur-studio-modal">
+      <div class="modal-top">
+        <div class="modal-title-wrap">
+          <span class="modal-icon-badge"><i data-icon="crop"></i></span>
+          <div>
+            <div class="modal-title" id="bsTitle">Студия блюра баннеров</div>
+            <div class="modal-sub" id="bsSubtitle">Выделите рекламные баннеры мышкой — живой предпросмотр работает прямо на видео</div>
+          </div>
+        </div>
+        <div class="modal-top-actions">
+          <button class="btn btn-primary hidden" id="bsSnapLive"><i data-icon="camera"></i><span>Снять кадр со стрима</span></button>
+          <button class="btn btn-subtle" id="bsLoadFile"><i data-icon="video"></i><span>Видео / фото</span></button>
+          <div class="scene-picker hidden" id="bsSceneWrap">
+            <select id="bsSceneSelect" class="input-select compact"></select>
+            <button class="btn-icon" id="bsAddScene" title="Добавить сцену"><i data-icon="plus"></i></button>
+            <button class="btn-icon danger" id="bsDelScene" title="Удалить сцену"><i data-icon="trash"></i></button>
+          </div>
+          <label class="switch-inline" title="Переключить живой предпросмотр блюра">
+            <input type="checkbox" id="bsPreviewToggle" checked />
+            <span class="switch-track"></span>
+            <span>Предпросмотр</span>
+          </label>
+          <button class="btn-icon" id="bsCloseBtn"><i data-icon="x"></i></button>
+        </div>
+      </div>
+
+      <div class="blur-studio-body">
+        <div class="bs-stage-col">
+          <div class="bs-stage-frame" id="bsStageFrame">
+            <div class="bs-media-box" id="bsMediaBox">
+              <div class="bs-grid-empty" id="bsEmptyGrid">
+                <i data-icon="crop"></i>
+                <div>Нажмите «Снять кадр со стрима» или откройте видео.<br/>Можно выделять зоны и прямо на сетке 16:9.</div>
+              </div>
+              <img id="bsImage" class="hidden" draggable="false" />
+              <video id="bsVideo" class="hidden" muted playsinline></video>
+              <div class="bs-overlay-layer" id="bsOverlay"></div>
+            </div>
+          </div>
+
+          <div class="bs-player-bar hidden" id="bsPlayerBar">
+            <button class="btn-icon" id="bsPlayBtn"><i data-icon="play"></i></button>
+            <span class="mono" id="bsTimeLbl">00:00 / 00:00</span>
+            <input type="range" id="bsScrubber" min="0" max="100" step="0.1" value="0" />
+          </div>
+        </div>
+
+        <aside class="bs-inspector">
+          <div class="inspector-section">
+            <div class="inspector-head">
+              <span>Зоны маскирования</span>
+              <span class="pill-count" id="bsZoneCount">0</span>
+            </div>
+            <div class="zone-list" id="bsZoneList"></div>
+          </div>
+
+          <div class="inspector-section" id="bsPropPanel">
+            <div class="field">
+              <label>Название зоны</label>
+              <input type="text" id="bsZoneLabel" class="input" placeholder="Баннер снизу" />
+            </div>
+
+            <div class="field">
+              <label>Режим скрытия</label>
+              <div class="seg-grid" id="bsModeSeg">
+                <button data-mode="blur" class="active">Блюр</button>
+                <button data-mode="pixelate">Пиксели</button>
+                <button data-mode="solid">Чёрный</button>
+                <button data-mode="image">Логотип</button>
+              </div>
+            </div>
+
+            <div class="field hidden" id="bsLogoField">
+              <label>Картинка / Логотип (PNG/JPG)</label>
+              <div class="input-row">
+                <input type="text" id="bsLogoPath" class="input" placeholder="Выберите PNG..." />
+                <button class="btn btn-subtle" id="bsPickLogo"><i data-icon="image"></i></button>
+              </div>
+            </div>
+
+            <div class="field" id="bsStrengthField">
+              <div class="field-head"><label>Интенсивность</label><span class="mono" id="bsStrengthVal">25</span></div>
+              <input type="range" id="bsStrength" min="4" max="60" value="25" />
+            </div>
+
+            <div class="field" id="bsFeatherField">
+              <div class="field-head"><label>Мягкие края (Feather)</label><span class="mono" id="bsFeatherVal">0 px</span></div>
+              <input type="range" id="bsFeather" min="0" max="40" value="0" />
+            </div>
+
+            <div class="field">
+              <label>Таймкод действия (сек, пусто = весь ролик)</label>
+              <div class="input-row">
+                <input type="text" id="bsStartSec" class="input" placeholder="От (напр. 60)" />
+                <input type="text" id="bsEndSec" class="input" placeholder="До (напр. 180)" />
+              </div>
+            </div>
+
+            <div class="ai-detect-card">
+              <div class="ai-detect-top">
+                <div>
+                  <div class="ai-detect-title">AI Авто-детектор баннера</div>
+                  <div class="ai-detect-sub" id="bsTplStatus">Блюрит только когда баннер в кадре</div>
+                </div>
+                <label class="switch-inline">
+                  <input type="checkbox" id="bsAutoDetect" />
+                  <span class="switch-track"></span>
+                </label>
+              </div>
+              <button class="btn btn-soft btn-full" id="bsSaveTpl">
+                <i data-icon="sparkles"></i><span>Запомнить образец баннера</span>
+              </button>
+            </div>
+
+            <div class="inspector-footer-btns">
+              <button class="btn btn-danger-ghost" id="bsDeleteZone"><i data-icon="trash"></i><span>Удалить</span></button>
+              <button class="btn btn-subtle" id="bsClearZones">Очистить все</button>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <div class="modal-bottom">
+        <span class="hint-text">Зажмите ЛКМ — нарисовать зону · Перетащить — сдвинуть · Углы — размер · Delete — удалить</span>
+        <div class="modal-bottom-btns">
+          <button class="btn btn-subtle" id="bsCancelBtn">Отмена</button>
+          <button class="btn btn-primary" id="bsSaveBtn"><i data-icon="check"></i><span>Сохранить зоны</span></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== CHANNEL SETTINGS DRAWER ==================== -->
+  <div class="drawer-backdrop hidden" id="chDrawer">
+    <div class="drawer-panel">
+      <div class="drawer-head">
+        <div>
+          <div class="drawer-title" id="chDrawerTitle">Параметры канала</div>
+          <div class="drawer-sub">Надёжность записи, фильтры категорий, расписание и чат</div>
+        </div>
+        <button class="btn-icon" id="chDrawerClose"><i data-icon="x"></i></button>
+      </div>
+      <div class="drawer-body" id="chDrawerBody"></div>
+      <div class="drawer-foot">
+        <button class="btn btn-subtle" id="chDrawerCancel">Отмена</button>
+        <button class="btn btn-primary" id="chDrawerSave"><i data-icon="check"></i><span>Сохранить</span></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== VIDEO PLAYER LIGHTBOX ==================== -->
+  <div class="modal-backdrop hidden" id="playerModal">
+    <div class="player-lightbox">
+      <div class="player-head">
+        <span class="player-title" id="playerTitle">Видео</span>
+        <button class="btn-icon" id="playerClose"><i data-icon="x"></i></button>
+      </div>
+      <video id="lightboxVideo" controls autoplay playsinline></video>
+    </div>
+  </div>
+
+  <!-- ==================== COMMAND PALETTE (Ctrl+K) ==================== -->
+  <div class="modal-backdrop hidden" id="cmdModal">
+    <div class="cmd-palette">
+      <div class="cmd-input-wrap">
+        <i data-icon="search"></i>
+        <input type="text" id="cmdInput" placeholder="Поиск команды, страницы или канала..." autocomplete="off" />
+        <kbd>ESC</kbd>
+      </div>
+      <div class="cmd-results" id="cmdResults"></div>
+    </div>
+  </div>
+
+  <!-- ==================== TOAST STACK ==================== -->
+  <div class="toast-stack" id="toastStack"></div>
+
+  <script src="/icons.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,105 @@
+name: Build & Publish Cloud Releases (Windows & macOS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Тег релиза (например v2.1.1 — оставьте пустым для тестовой сборки без публикации Release)"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Inject GitHub Repo & Version into Build
+        shell: pwsh
+        run: |
+          $repo = "${{ github.repository }}"
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event.inputs.release_tag }}" -ne "") { $tag = "${{ github.event.inputs.release_tag }}" }
+          $cfg = Get-Content app/config.py -Raw -Encoding UTF8
+          $cfg = [regex]::Replace($cfg, 'DEFAULT_GITHUB_REPO\s*=\s*"[^"]*"', "DEFAULT_GITHUB_REPO = `"$repo`"")
+          if ($tag -match '^v?(\d+\.\d+\.\d+.*)$') {
+            $ver = $Matches[1]
+            $cfg = [regex]::Replace($cfg, 'APP_VERSION\s*=\s*"[^"]*"', "APP_VERSION = `"$ver`"")
+          }
+          Set-Content app/config.py -Value $cfg -Encoding UTF8
+      - name: Install FFmpeg
+        run: choco install ffmpeg -y
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Build TwitchRecorderPro.exe
+        run: pyinstaller --noconfirm --clean TwitchRecorderPro.spec
+      - name: Package Windows ZIP
+        shell: pwsh
+        run: Compress-Archive -Path dist/TwitchRecorderPro/* -DestinationPath TwitchRecorderPro-Windows.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: TwitchRecorderPro-Windows.zip
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Inject GitHub Repo & Version into Build
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = "${{ github.event.inputs.release_tag }}" or os.environ.get("GITHUB_REF_NAME", "")
+          p = Path("app/config.py")
+          txt = p.read_text(encoding="utf-8")
+          txt = re.sub(r'DEFAULT_GITHUB_REPO\s*=\s*"[^"]*"', f'DEFAULT_GITHUB_REPO = "{repo}"', txt)
+          m = re.match(r'^v?(\d+\.\d+\.\d+.*)$', tag)
+          if m:
+              txt = re.sub(r'APP_VERSION\s*=\s*"[^"]*"', f'APP_VERSION = "{m.group(1)}"', txt)
+          p.write_text(txt, encoding="utf-8")
+          PY
+      - name: Build macOS .app, .zip and .dmg
+        run: |
+          chmod +x build/build_macos.sh
+          ./build/build_macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: |
+            dist/TwitchRecorderPro-macOS.dmg
+            dist/TwitchRecorderPro-macOS.zip
+
+  publish-release:
+    needs: [build-windows, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref_name }}
+          name: "Twitch Recorder Pro ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref_name }}"
+          generate_release_notes: true
+          files: |
+            release-assets/TwitchRecorderPro-Windows.zip
+            release-assets/TwitchRecorderPro-macOS.dmg
+            release-assets/TwitchRecorderPro-macOS.zip

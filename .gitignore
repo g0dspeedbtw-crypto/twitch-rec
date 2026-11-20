@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+build/TwitchRecorderPro/
+dist/
+recordings/
+templates/
+config.json
+TwitchRecorderPro-Windows.zip
+*.dmg
+*.lnk
+*.log
+.DS_Store
