@@ -380,10 +380,10 @@ def build_blur_filter_graph(
 
         crop_w = f"max(4,trunc(iw*{r.w:.6f}/2)*2)"
         crop_h = f"max(4,trunc(ih*{r.h:.6f}/2)*2)"
-        crop_x = f"min(iw-4,trunc(iw*{r.x:.6f}/2)*2)"
-        crop_y = f"min(ih-4,trunc(ih*{r.y:.6f}/2)*2)"
-        ov_x = f"min(main_w-4,trunc(main_w*{r.x:.6f}/2)*2)"
-        ov_y = f"min(main_h-4,trunc(main_h*{r.y:.6f}/2)*2)"
+        crop_x = f"max(0,min(iw-({crop_w}),trunc(iw*{r.x:.6f}/2)*2))"
+        crop_y = f"max(0,min(ih-({crop_h}),trunc(ih*{r.y:.6f}/2)*2))"
+        ov_x = f"max(0,min(main_w-overlay_w,trunc(main_w*{r.x:.6f}/2)*2))"
+        ov_y = f"max(0,min(main_h-overlay_h,trunc(main_h*{r.y:.6f}/2)*2))"
 
         # Soft edge feathering filter snippet (#1)
         feather_chain = ""
@@ -482,6 +482,23 @@ def build_blur_filter_complex(regions: List[BlurRegion]) -> Optional[str]:
 
 
 # ------------------------------------------------------------------ Video Probing & Frames
+def _has_audio_stream(path: str) -> bool:
+    ffprobe = get_ffprobe_path()
+    if not ffprobe or not os.path.exists(path):
+        return True
+    try:
+        res = subprocess.run(
+            [
+                ffprobe, "-v", "error", "-select_streams", "a:0",
+                "-show_entries", "stream=codec_type", "-of", "csv=p=0", path,
+            ],
+            capture_output=True, text=True, timeout=6, creationflags=CREATE_NO_WINDOW,
+        )
+        return "audio" in (res.stdout or "").lower()
+    except Exception:
+        return True
+
+
 def probe_video(path: str) -> Dict[str, float]:
     ffprobe = get_ffprobe_path()
     info = {"duration": 0.0, "width": 0.0, "height": 0.0, "size_bytes": 0.0}
@@ -608,7 +625,13 @@ def concat_videos(
                 f"[{idx}:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
                 f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=60[v{idx}]"
             )
-            f_parts.append(f"[{idx}:a]aresample=48000,aformat=channel_layouts=stereo[a{idx}]")
+            # Check if file has an audio stream; if not, synthesize silent stereo audio so concat never fails
+            has_audio = _has_audio_stream(p)
+            if has_audio:
+                f_parts.append(f"[{idx}:a]aresample=48000,aformat=channel_layouts=stereo[a{idx}]")
+            else:
+                dur = max(0.5, probe_video(p).get("duration", 1.0))
+                f_parts.append(f"anullsrc=channel_layout=stereo:sample_rate=48000:d={dur:.2f}[a{idx}]")
             cat_in.append(f"[v{idx}][a{idx}]")
         f_parts.append(f"{''.join(cat_in)}concat=n={len(valid)}:v=1:a=1[vout][aout]")
         cmd.extend([
@@ -748,15 +771,20 @@ def build_shorts_9_16_filter(
         cr = cam_region.clamped()
         gr = game_region.clamped() if game_region else BlurRegion(0.2, 0.0, 0.6, 1.0)
 
+        cr_w = f"max(4,trunc(iw*{cr.w:.6f}/2)*2)"
+        cr_h = f"max(4,trunc(ih*{cr.h:.6f}/2)*2)"
+        gr_w = f"max(4,trunc(iw*{gr.w:.6f}/2)*2)"
+        gr_h = f"max(4,trunc(ih*{gr.h:.6f}/2)*2)"
+
         parts.append(f"{base_pad}split=2[scam][sgame]")
         parts.append(
-            f"[scam]crop=w='max(4,trunc(iw*{cr.w:.6f}/2)*2)':h='max(4,trunc(ih*{cr.h:.6f}/2)*2)':"
-            f"x='trunc(iw*{cr.x:.6f}/2)*2':y='trunc(ih*{cr.y:.6f}/2)*2',"
+            f"[scam]crop=w='{cr_w}':h='{cr_h}':"
+            f"x='max(0,min(iw-({cr_w}),trunc(iw*{cr.x:.6f}/2)*2))':y='max(0,min(ih-({cr_h}),trunc(ih*{cr.y:.6f}/2)*2))',"
             f"scale=1080:{cam_h}:force_original_aspect_ratio=increase,crop=1080:{cam_h},setsar=1[topv]"
         )
         parts.append(
-            f"[sgame]crop=w='max(4,trunc(iw*{gr.w:.6f}/2)*2)':h='max(4,trunc(ih*{gr.h:.6f}/2)*2)':"
-            f"x='trunc(iw*{gr.x:.6f}/2)*2':y='trunc(ih*{gr.y:.6f}/2)*2',"
+            f"[sgame]crop=w='{gr_w}':h='{gr_h}':"
+            f"x='max(0,min(iw-({gr_w}),trunc(iw*{gr.x:.6f}/2)*2))':y='max(0,min(ih-({gr_h}),trunc(ih*{gr.y:.6f}/2)*2))',"
             f"scale=1080:{game_h}:force_original_aspect_ratio=increase,crop=1080:{game_h},setsar=1[botv]"
         )
         parts.append("[topv][botv]vstack=inputs=2[vout]")

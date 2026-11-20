@@ -106,7 +106,17 @@ class _ThumbWorker(QThread):
 class _SnapWorker(QThread):
     ready = Signal(str, bool, str, str)  # req_id, ok, jpg_path, msg
 
-    def __init__(self, req_id: str, mode: str, target, ts: float, quality: str, proxy_url: str, parent=None):
+    def __init__(
+        self,
+        req_id: str,
+        mode: str,
+        target,
+        ts: float,
+        quality: str,
+        proxy_url: str,
+        oauth_token: str = "",
+        parent=None,
+    ):
         super().__init__(parent)
         self.req_id = req_id
         self.mode = mode
@@ -114,13 +124,14 @@ class _SnapWorker(QThread):
         self.ts = ts
         self.quality = quality
         self.proxy_url = proxy_url
+        self.oauth_token = oauth_token
 
     def run(self) -> None:
         out_jpg = os.path.join(tempfile.gettempdir(), f"tr_snap_{self.req_id}.jpg")
         if self.mode == "live":
             ok, msg = capture_live_snapshot(self.target, out_jpg, self.quality, self.proxy_url)
         elif self.mode == "vod":
-            ok, msg = capture_vod_snapshot(self.target, out_jpg, self.ts)
+            ok, msg = capture_vod_snapshot(self.target, out_jpg, self.ts, self.oauth_token, self.proxy_url)
         else:
             ok, msg = extract_frame_from_file(self.target, self.ts, out_jpg)
         self.ready.emit(self.req_id, ok, out_jpg if ok else "", msg)
@@ -858,6 +869,7 @@ class AppBridge(QObject):
         t.update({"dur": dur, "size": size, "speed": speed})
         self._emit("rec_progress", {"key": key, **t})
 
+    @Slot(str, list, bool, bool)
     def _on_rec_finished(self, key: str, files: list, ok: bool, needs_post_blur: bool) -> None:
         w = self.live_recorders.pop(key, None)
         if w:
@@ -872,6 +884,8 @@ class AppBridge(QObject):
             if needs_post_blur and ch and ch.blur_regions:
                 for fp in files:
                     self._enqueue_blur_job(fp, ch.blur_regions, delete_original=not ch.keep_original, normalize_audio=self.config.normalize_audio_default, force_now=False)
+        elif key not in self.manually_stopped:
+            self._toast("Не удалось записать эфир", f"{ch.username if ch else key} — поток оффлайн или недоступен", "error")
 
     # ------------------------------------------------------------------ Snapshots & AI Template Capture
     @Slot(str, bool, str, str)
@@ -885,7 +899,10 @@ class AppBridge(QObject):
         req_id = uuid.uuid4().hex[:8]
         target = self.config.get_channel(target_str) if mode == "live" else target_str
         quality = target.quality if isinstance(target, ChannelConfig) else "best"
-        w = _SnapWorker(req_id, mode, target or target_str, ts_sec, quality, self.config.proxy_url, self)
+        w = _SnapWorker(
+            req_id, mode, target or target_str, ts_sec, quality,
+            self.config.proxy_url, self.config.twitch_oauth_token, self
+        )
         w.ready.connect(self._on_snapshot_ready)
         w.finished.connect(w.deleteLater)
         self._aux_workers.append(w)
@@ -1006,6 +1023,7 @@ class AppBridge(QObject):
         self.vod_workers[jid] = w
         w.start()
 
+    @Slot(str, float, str)
     def _on_job_progress(self, jid: str, pct: float, status: str) -> None:
         j = self.jobs.get(jid)
         if j:
@@ -1013,6 +1031,7 @@ class AppBridge(QObject):
             j["status"] = status
             self._push_job(jid)
 
+    @Slot(str, str, bool)
     def _on_vod_finished(self, jid: str, out_path: str, ok: bool) -> None:
         w = self.vod_workers.pop(jid, None)
         if w:
@@ -1024,6 +1043,12 @@ class AppBridge(QObject):
             if ok:
                 j["progress"] = 100.0
             self._push_job(jid)
+        if ok and out_path:
+            self._toast("Загрузка VOD готова", Path(out_path).name, "success")
+        elif not ok:
+            st_txt = (j or {}).get("status") or "Ошибка загрузки"
+            if st_txt != "Отменено":
+                self._toast("Ошибка загрузки VOD", st_txt, "error")
         regs = self.vod_blur_regions.pop(jid, None)
         if ok and out_path and regs:
             self._enqueue_blur_job(out_path, regs, delete_original=False, normalize_audio=self.config.normalize_audio_default, force_now=False)
@@ -1182,6 +1207,11 @@ class AppBridge(QObject):
             self._toast("Блюр готов", Path(out_path).name, "success")
             if self.config.notify_on_blur:
                 send_notification_async(self.config, "Блюр видео готов", Path(out_path).name, log_cb=self._log)
+        elif not ok:
+            j = self.jobs.get(jid) or {}
+            st_txt = j.get("status") or "Ошибка FFmpeg"
+            if st_txt != "Отменено":
+                self._toast("Ошибка блюра", st_txt, "error")
         self._pump_blur_queue(force=False)
 
     @Slot(str)
@@ -1254,6 +1284,8 @@ class AppBridge(QObject):
                 target.with_suffix(".markers.json"),
                 target.with_suffix(".meta.json"),
                 target.with_suffix(".edl"),
+                target.with_suffix(".srt"),
+                target.with_suffix(".subs.ass"),
             ):
                 if side.exists():
                     try:
@@ -1419,8 +1451,11 @@ class AppBridge(QObject):
             if ok:
                 j["progress"] = 100.0
             self._push_job(jid)
-        if ok:
-            self._toast("Задача студии готова", Path(out_path).name if out_path else "", "success")
+        if ok and out_path:
+            self._toast("Задача студии готова", Path(out_path).name, "success")
+        else:
+            j = self.jobs.get(jid) or {}
+            self._toast("Ошибка задачи студии", j.get("status") or "Не удалось выполнить операцию", "error")
 
     # ------------------------------------------------------------------ Settings & Notifications
     @Slot(str)
@@ -1611,7 +1646,10 @@ class AppBridge(QObject):
             self._tg_reply(f"Не удалось снять кадр: {msg}")
 
     def _start_tg_snap(self, ch: ChannelConfig) -> None:
-        w = _SnapWorker(uuid.uuid4().hex[:6], "live", ch, 0.0, ch.quality, self.config.proxy_url, self)
+        w = _SnapWorker(
+            uuid.uuid4().hex[:6], "live", ch, 0.0, ch.quality,
+            self.config.proxy_url, self.config.twitch_oauth_token, self
+        )
         w.ready.connect(self._on_tg_snap_ready)
         w.finished.connect(w.deleteLater)
         self._aux_workers.append(w)

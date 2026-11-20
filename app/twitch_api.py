@@ -457,15 +457,29 @@ def capture_live_snapshot(
     return False, f"Канал {ch.username} сейчас оффлайн или не удалось захватить кадр"
 
 
-def capture_vod_snapshot(vod_url: str, output_jpg: str, timestamp_sec: float = 30.0) -> Tuple[bool, str]:
+def capture_vod_snapshot(
+    vod_url: str,
+    output_jpg: str,
+    timestamp_sec: float = 30.0,
+    oauth_token: str = "",
+    proxy_url: str = "",
+) -> Tuple[bool, str]:
     ytdlp_cmd = get_ytdlp_cmd()
     ffmpeg = get_ffmpeg_path()
     if not ytdlp_cmd or not ffmpeg:
         return False, "Не найден yt-dlp или ffmpeg"
 
     try:
+        cmd = [*ytdlp_cmd, "-g", "-f", "best"]
+        if proxy_url.strip():
+            cmd.extend(["--proxy", proxy_url.strip()])
+        if oauth_token.strip():
+            tok = oauth_token.strip()
+            tok = tok[6:] if tok.lower().startswith("oauth:") else tok
+            cmd.extend(["--add-header", f"Authorization: OAuth {tok}"])
+        cmd.append(vod_url.strip())
         res = subprocess.run(
-            [*ytdlp_cmd, "-g", "-f", "best", vod_url.strip()],
+            cmd,
             capture_output=True, text=True, timeout=25, creationflags=CREATE_NO_WINDOW,
         )
         urls = [line.strip() for line in (res.stdout or "").splitlines() if line.strip()]

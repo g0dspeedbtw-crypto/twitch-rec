@@ -162,6 +162,12 @@ class LiveRecorderWorker(QThread):
                 sl.terminate()
             except Exception:
                 pass
+        ff = self._ff_proc
+        if ff and ff.poll() is None:
+            try:
+                ff.terminate()
+            except Exception:
+                pass
 
     def add_marker(self, note: str = "Момент") -> float:
         t = round(max(0.0, time.time() - self._start_wall), 2)
@@ -274,6 +280,15 @@ class LiveRecorderWorker(QThread):
             self.log_message.emit(f"[{uname}] Авто-склейка {len(final_files)} частей в {Path(merged_path).name}...")
             c_ok, _ = concat_videos(final_files, merged_path, normalize_clips=False)
             if c_ok:
+                # Rename chat sidecars to match merged_path
+                for side_ext in (".chat.json", ".chat.ass"):
+                    old_side = first_base.with_suffix(side_ext)
+                    new_side = Path(merged_path).with_suffix(side_ext)
+                    if old_side.exists() and old_side != new_side:
+                        try:
+                            old_side.replace(new_side)
+                        except Exception:
+                            pass
                 for p in final_files:
                     try:
                         os.remove(p)
@@ -336,7 +351,8 @@ class LiveRecorderWorker(QThread):
                 sl_cmd.append(f"--twitch-api-header=Authorization=OAuth {tok}")
         if self.app_config.proxy_url.strip():
             sl_cmd.extend(["--http-proxy", self.app_config.proxy_url.strip()])
-        sl_cmd.extend([self.channel.stream_url, self.channel.quality])
+        q_arg = f"{self.channel.quality},best" if self.channel.quality != "best" else "best"
+        sl_cmd.extend([self.channel.stream_url, q_arg])
 
         ff_cmd = [
             ffmpeg, "-y", "-hide_banner", "-loglevel", "info",
@@ -653,9 +669,16 @@ class ClipsBatchWorker(QThread):
         self.merge_compilation = merge_compilation
         self.app_config = app_config
         self._stop = False
+        self._proc: Optional[subprocess.Popen] = None
 
     def request_stop(self) -> None:
         self._stop = True
+        p = self._proc
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
 
     def run(self) -> None:
         ytdlp_cmd = get_ytdlp_cmd()
@@ -681,10 +704,26 @@ class ClipsBatchWorker(QThread):
             cmd = [*ytdlp_cmd, "--no-colors", "-f", "best", "-o", out_tmpl, "--print", "after_move:PATH:%(filepath)s"]
             if ffmpeg:
                 cmd.extend(["--ffmpeg-location", str(Path(ffmpeg).parent)])
+            if self.app_config.proxy_url.strip():
+                cmd.extend(["--proxy", self.app_config.proxy_url.strip()])
+            if self.app_config.twitch_oauth_token.strip():
+                tok = self.app_config.twitch_oauth_token.strip()
+                tok = tok[6:] if tok.lower().startswith("oauth:") else tok
+                cmd.extend(["--add-header", f"Authorization: OAuth {tok}"])
             cmd.append(url)
             try:
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=180, creationflags=CREATE_NO_WINDOW)
-                for line in (res.stdout or "").splitlines():
+                self._proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW,
+                )
+                try:
+                    out_txt, _ = self._proc.communicate(timeout=180)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+                    out_txt, _ = self._proc.communicate()
+                finally:
+                    self._proc = None
+                for line in (out_txt or "").splitlines():
                     if line.startswith("PATH:"):
                         fp = line[5:].strip()
                         if os.path.exists(fp):
@@ -865,6 +904,19 @@ class BlurPostProcessWorker(QThread):
 
             if rc == 0 and os.path.exists(self.output_path) and os.path.getsize(self.output_path) > 10_000:
                 fsize = format_bytes(os.path.getsize(self.output_path))
+                # Preserve companion sidecar files (.chat.json, .chat.ass, .markers.json, .meta.json, .edl)
+                for side_ext in (".chat.json", ".chat.ass", ".markers.json", ".meta.json", ".edl"):
+                    src_side = Path(self.input_path).with_suffix(side_ext)
+                    dst_side = Path(self.output_path).with_suffix(side_ext)
+                    if src_side.exists() and not dst_side.exists():
+                        try:
+                            if self.delete_original:
+                                src_side.replace(dst_side)
+                            else:
+                                import shutil
+                                shutil.copy2(src_side, dst_side)
+                        except Exception:
+                            pass
                 if self.delete_original and os.path.abspath(self.input_path) != os.path.abspath(self.output_path):
                     try:
                         os.remove(self.input_path)
@@ -976,17 +1028,34 @@ class StudioToolWorker(QThread):
         q = self.app_config.video_quality
         try:
             if self.action == "trim":
-                self.progress_updated.emit(self.job_id, 25.0, "Обрезка видео...")
-                ok, res = trim_video_fast(
-                    self.params["input_path"],
-                    self.params["start_sec"],
-                    self.params["end_sec"],
-                    self.params["output_path"],
-                    accurate_reencode=self.params.get("accurate", False),
-                    encoder=enc,
-                    quality=q,
-                )
-                self._emit_done(ok, res, "Обрезка готова")
+                inp = self.params["input_path"]
+                out = self.params["output_path"]
+                s_sec = max(0.0, float(self.params["start_sec"]))
+                e_sec = float(self.params["end_sec"])
+                dur = max(0.5, e_sec - s_sec)
+                accurate = bool(self.params.get("accurate", False))
+                if accurate:
+                    self.progress_updated.emit(self.job_id, 5.0, f"Точная обрезка ({enc})...")
+                    cmd = [
+                        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                        "-ss", f"{s_sec:.3f}", "-i", inp, "-t", f"{dur:.3f}",
+                        *encoder_ffmpeg_args(enc, q),
+                        "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out,
+                    ]
+                    rc, err = self._run_ffmpeg_with_progress(cmd, dur, f"Обрезка ({enc})", timeout=1800)
+                    if self._stop_requested:
+                        if os.path.exists(out):
+                            try:
+                                os.remove(out)
+                            except Exception:
+                                pass
+                        self._emit_done(False, "Отменено", "")
+                        return
+                    self._emit_done(rc == 0 and os.path.exists(out), out if rc == 0 else err, "Обрезка готова")
+                else:
+                    self.progress_updated.emit(self.job_id, 25.0, "Быстрая обрезка без перекодирования...")
+                    ok, res = trim_video_fast(inp, s_sec, e_sec, out, accurate_reencode=False, encoder=enc, quality=q)
+                    self._emit_done(ok, res, "Обрезка готова")
 
             elif self.action == "multi_cut":
                 # #18 Multi-Cut Timeline Compilation from user-selected segments
@@ -1170,8 +1239,26 @@ class StudioToolWorker(QThread):
                 inp = self.params["input_path"]
                 ass_path = self.params["ass_path"]
                 out = self.params["output_path"]
+                if ass_path and not os.path.exists(ass_path):
+                    # Auto-generate .chat.ass from .chat.json if only JSON exists
+                    json_cand = re.sub(r"\.chat\.ass$", ".chat.json", ass_path)
+                    if os.path.exists(json_cand):
+                        try:
+                            from app.chat_and_ai import generate_chat_ass
+                            raw_c = json.loads(Path(json_cand).read_text(encoding="utf-8"))
+                            msgs = raw_c if isinstance(raw_c, list) else (raw_c.get("messages", []) if isinstance(raw_c, dict) else [])
+                            if msgs:
+                                generate_chat_ass(
+                                    msgs,
+                                    ass_path,
+                                    position=self.app_config.chat_position,
+                                    font_size=self.app_config.chat_font_size,
+                                    hide_bots=self.app_config.chat_hide_bots,
+                                )
+                        except Exception:
+                            pass
                 if not ass_path or not os.path.exists(ass_path):
-                    self._emit_done(False, f"Файл чата (.chat.ass) не найден: {ass_path}", "")
+                    self._emit_done(False, f"Файл чата (.chat.ass / .chat.json) не найден: {ass_path}", "")
                     return
                 total_dur = probe_video(inp).get("duration", 0.0)
                 self.progress_updated.emit(self.job_id, 5.0, f"Наложение чата ({enc})...")
@@ -1215,10 +1302,12 @@ class StudioToolWorker(QThread):
 
                 self.progress_updated.emit(self.job_id, 5.0, f"Экспорт ({pr['label']})...")
                 if watermark_path and os.path.exists(watermark_path):
-                    # #23 Overlay channel watermark in top-right corner (10% width, 75% opacity)
+                    # #23 Overlay channel watermark in top-right corner (~10% width, 78% opacity)
                     fg = (
-                        f"[0:v]{vf}[base];"
-                        f"[1:v]format=rgba,colorchannelmixer=aa=0.78,scale=w='max(64,iw)':h=-1[wm];"
+                        f"[0:v]{vf},split=2[base][wmref];"
+                        f"[1:v]format=rgba,colorchannelmixer=aa=0.78[wmraw];"
+                        f"[wmraw][wmref]scale2ref=w='max(64,trunc(iw*0.10/2)*2)':h='trunc(ow/mdar/2)*2'[wm][wmdrop];"
+                        f"[wmdrop]nullsink;"
                         f"[base][wm]overlay=W-w-28:24[vout]"
                     )
                     cmd = [

@@ -134,6 +134,7 @@ def send_notification_async(
 
     def _worker() -> None:
         text = f"*{title}*\n{message}"
+        proxies = {"http": config.proxy_url.strip(), "https": config.proxy_url.strip()} if config.proxy_url.strip() else None
         if has_tg:
             try:
                 tok = config.telegram_bot_token.strip()
@@ -146,6 +147,7 @@ def send_notification_async(
                             data={"chat_id": cid, "caption": f"{title}\n{message}"},
                             files={"photo": f},
                             timeout=12,
+                            proxies=proxies,
                         )
                 else:
                     url = f"https://api.telegram.org/bot{tok}/sendMessage"
@@ -153,6 +155,7 @@ def send_notification_async(
                         url,
                         json={"chat_id": cid, "text": text, "parse_mode": "Markdown"},
                         timeout=10,
+                        proxies=proxies,
                     )
             except Exception as exc:
                 if log_cb:
@@ -169,9 +172,10 @@ def send_notification_async(
                             data={"content": payload["content"]},
                             files={"file": (os.path.basename(image_path), f, "image/jpeg")},
                             timeout=12,
+                            proxies=proxies,
                         )
                 else:
-                    requests.post(wh, json=payload, timeout=10)
+                    requests.post(wh, json=payload, timeout=10, proxies=proxies)
             except Exception as exc:
                 if log_cb:
                     log_cb(f"[Discord] Ошибка отправки: {exc}")
@@ -209,8 +213,16 @@ def cleanup_old_recordings(output_dir: str, max_age_days: int) -> Tuple[int, flo
                     f.unlink()
                     deleted += 1
                     freed_bytes += sz
-                    # Remove companion chat/marker files if present
-                    for side in (f.with_suffix(".chat.json"), f.with_suffix(".chat.ass"), f.with_suffix(".markers.json")):
+                    # Remove companion chat/marker/meta/edl/subtitle files if present
+                    for side in (
+                        f.with_suffix(".chat.json"),
+                        f.with_suffix(".chat.ass"),
+                        f.with_suffix(".markers.json"),
+                        f.with_suffix(".meta.json"),
+                        f.with_suffix(".edl"),
+                        f.with_suffix(".srt"),
+                        f.with_suffix(".subs.ass"),
+                    ):
                         if side.exists():
                             try:
                                 side.unlink()

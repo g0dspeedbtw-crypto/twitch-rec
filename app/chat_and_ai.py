@@ -399,7 +399,7 @@ def analyze_chat_highlights(
         return [], []
     try:
         raw = json.loads(Path(chat_json_path).read_text(encoding="utf-8"))
-        msgs = raw.get("messages", [])
+        msgs = raw if isinstance(raw, list) else (raw.get("messages", []) if isinstance(raw, dict) else [])
     except Exception:
         return [], []
     if not msgs:
@@ -759,6 +759,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             self.progress_updated.emit(self.job_id, 100.0, f"Готово: {srt_path.name} (без FFmpeg)")
             self.finished_ai.emit(self.job_id, str(srt_path), True)
             return
+        if not segments:
+            self.log_message.emit("[AI] В видео не обнаружена речь — вшивание субтитров пропущено.")
+            self.progress_updated.emit(self.job_id, 100.0, "Речь не обнаружена")
+            self.finished_ai.emit(self.job_id, self.video_path, True)
+            return
         out_video = str(p.with_name(f"{p.stem}_subtitled{p.suffix}"))
         self.progress_updated.emit(self.job_id, 85.0, "Вшивание субтитров в видео...")
         escaped_ass = escape_ffmpeg_filter_path(str(ass_path))
@@ -785,7 +790,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             self.finished_ai.emit(self.job_id, out_video, True)
         else:
             self.log_message.emit(f"[AI] Ошибка вшивания субтитров: {err}")
-            self.finished_ai.emit(self.job_id, str(srt_path), True)
+            self.progress_updated.emit(self.job_id, 0.0, f"Ошибка FFmpeg (SRT сохранён: {srt_path.name})")
+            self.finished_ai.emit(self.job_id, str(srt_path), False)
 
     def _finish_censor(self, segments) -> None:
         matches: List[Tuple[float, float, str]] = []
