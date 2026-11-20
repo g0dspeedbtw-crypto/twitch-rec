@@ -81,6 +81,7 @@ class StudioDesktopWindow(QMainWindow):
         self.channel = QWebChannel(self.web.page())
         self.channel.registerObject("backend", self.bridge)
         self.web.page().setWebChannel(self.channel)
+        self.bridge.bind_web_page(self.web.page())
         self.web.setUrl(QUrl(f"http://127.0.0.1:{port}/"))
         self.setCentralWidget(self.web)
 

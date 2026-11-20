@@ -1,7 +1,31 @@
 from __future__ import annotations
 
 import multiprocessing
+import os
 import sys
+
+
+def _ensure_ssl_cert_env() -> None:
+    """
+    Ensure SSL_CERT_FILE is set on macOS so static OpenSSL builds (e.g. bundled static ffmpeg)
+    and child subprocesses can verify HTTPS TLS certificates (Twitch HLS, VODs, APIs).
+    """
+    if sys.platform == "darwin" and not os.environ.get("SSL_CERT_FILE"):
+        for candidate in ("/etc/ssl/cert.pem", "/private/etc/ssl/cert.pem"):
+            if os.path.isfile(candidate):
+                os.environ["SSL_CERT_FILE"] = candidate
+                break
+        if not os.environ.get("SSL_CERT_FILE"):
+            try:
+                import certifi
+                ca = certifi.where()
+                if ca and os.path.isfile(ca):
+                    os.environ["SSL_CERT_FILE"] = ca
+            except Exception:
+                pass
+
+
+_ensure_ssl_cert_env()
 
 
 def _maybe_run_internal_cli() -> bool:

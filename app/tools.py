@@ -15,6 +15,12 @@ from app.config import BlurRegion
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+if sys.platform == "darwin" and not os.environ.get("SSL_CERT_FILE"):
+    for _ca_cand in ("/etc/ssl/cert.pem", "/private/etc/ssl/cert.pem"):
+        if os.path.isfile(_ca_cand):
+            os.environ["SSL_CERT_FILE"] = _ca_cand
+            break
+
 
 def _extra_search_dirs() -> List[Path]:
     dirs: List[Path] = []

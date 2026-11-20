@@ -186,21 +186,39 @@
       ` : `<div class="channels-grid ${state.config.compact_cards ? "compact" : ""}" id="channelsGrid">${state.channels.map(renderChannelCard).join("")}</div>`}
     `;
 
-    $("#liveAutoMon").onchange = (e) => callBackend("setAutoMonitor", e.target.checked);
+    $("#liveAutoMon").onchange = async (e) => {
+      const res = await callBackend("setAutoMonitor", e.target.checked);
+      if (res) {
+        try { state.config = JSON.parse(res); } catch {}
+      }
+    };
     $("#btnCheckNow").onclick = () => { callBackend("checkChannels"); showToast("Проверка эфиров", "Обновляем статусы каналов...", "info"); };
     $("#btnRecAll").onclick = () => callBackend("recordAllOnline");
     $("#btnStopAll").onclick = () => callBackend("stopAllRecordings");
 
+    const applyChannelsReturn = (raw) => {
+      if (!raw) return;
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed.channels)) {
+          state.channels = parsed.channels;
+          if (state.page === "live") renderLivePage();
+          updateNavBadges();
+        }
+      } catch {}
+    };
+
     const doAdd = async () => {
       const val = $("#addChInput").value.trim();
       if (!val) return;
-      await callBackend("addChannels", val, $("#addPlat").value);
       $("#addChInput").value = "";
+      const raw = await callBackend("addChannels", val, $("#addPlat").value);
+      applyChannelsReturn(raw);
     };
     $("#btnAddCh").onclick = doAdd;
     $("#addChInput").onkeydown = (e) => { if (e.key === "Enter") doAdd(); };
 
-    bindChannelCardEvents(root);
+    bindChannelCardEvents(root, applyChannelsReturn);
   }
 
   function renderChannelCard(ch) {
@@ -281,7 +299,7 @@
     `;
   }
 
-  function bindChannelCardEvents(root) {
+  function bindChannelCardEvents(root, applyChannelsReturn) {
     root.querySelectorAll(".channel-card").forEach((card) => {
       const key = card.dataset.key;
       const ch = state.channels.find((c) => c.key === key);
@@ -289,13 +307,28 @@
       card.querySelector(".act-rec")?.addEventListener("click", () => callBackend("startRecording", key));
       card.querySelector(".act-stop")?.addEventListener("click", () => callBackend("stopRecording", key));
       card.querySelector(".act-marker")?.addEventListener("click", () => callBackend("dropMarker", key));
-      card.querySelector(".act-del")?.addEventListener("click", () => callBackend("deleteChannel", key));
+      card.querySelector(".act-del")?.addEventListener("click", async () => {
+        const raw = await callBackend("deleteChannel", key);
+        if (applyChannelsReturn) applyChannelsReturn(raw);
+      });
       card.querySelector(".act-settings")?.addEventListener("click", () => openChannelDrawer(ch));
       card.querySelector(".act-blur")?.addEventListener("click", () => openBlurStudio({ mode: "channel", channel: ch }));
-      card.querySelector(".act-quality")?.addEventListener("change", (e) => callBackend("updateChannelField", key, JSON.stringify({ quality: e.target.value })));
-      card.querySelector(".act-blurmode")?.addEventListener("change", (e) => callBackend("updateChannelField", key, JSON.stringify({ blur_mode: e.target.value })));
-      card.querySelector(".act-preset")?.addEventListener("change", (e) => callBackend("updateChannelField", key, JSON.stringify({ active_preset: e.target.value })));
-      card.querySelector(".act-auto")?.addEventListener("change", (e) => callBackend("updateChannelField", key, JSON.stringify({ auto_record: e.target.checked })));
+      card.querySelector(".act-quality")?.addEventListener("change", async (e) => {
+        const raw = await callBackend("updateChannelField", key, JSON.stringify({ quality: e.target.value }));
+        if (applyChannelsReturn) applyChannelsReturn(raw);
+      });
+      card.querySelector(".act-blurmode")?.addEventListener("change", async (e) => {
+        const raw = await callBackend("updateChannelField", key, JSON.stringify({ blur_mode: e.target.value }));
+        if (applyChannelsReturn) applyChannelsReturn(raw);
+      });
+      card.querySelector(".act-preset")?.addEventListener("change", async (e) => {
+        const raw = await callBackend("updateChannelField", key, JSON.stringify({ active_preset: e.target.value }));
+        if (applyChannelsReturn) applyChannelsReturn(raw);
+      });
+      card.querySelector(".act-auto")?.addEventListener("change", async (e) => {
+        const raw = await callBackend("updateChannelField", key, JSON.stringify({ auto_record: e.target.checked }));
+        if (applyChannelsReturn) applyChannelsReturn(raw);
+      });
     });
   }
 
@@ -1883,10 +1916,19 @@
     const closeModal = () => { vid.pause(); $("#blurModal").classList.add("hidden"); };
     $("#bsCloseBtn").onclick = closeModal;
     $("#bsCancelBtn").onclick = closeModal;
-    $("#bsSaveBtn").onclick = () => {
+    $("#bsSaveBtn").onclick = async () => {
       bs.presets[bs.activePreset] = bs.regions;
       if (bs.mode === "channel" && bs.channel) {
-        callBackend("saveChannelBlurPresets", bs.channel.key, JSON.stringify(bs.presets), bs.activePreset);
+        const raw = await callBackend("saveChannelBlurPresets", bs.channel.key, JSON.stringify(bs.presets), bs.activePreset);
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed.channels)) {
+              state.channels = parsed.channels;
+              if (state.page === "live") renderLivePage();
+            }
+          } catch {}
+        }
       } else if (bs.mode === "manual") {
         state.manualBlurRegions = JSON.parse(JSON.stringify(bs.regions));
         renderBlurPage();
@@ -1938,10 +1980,10 @@
     const close = () => $("#chDrawer").classList.add("hidden");
     $("#chDrawerClose").onclick = close;
     $("#chDrawerCancel").onclick = close;
-    $("#chDrawerSave").onclick = () => {
+    $("#chDrawerSave").onclick = async () => {
       if (!drawerChKey) return;
       const days = [...$("#cdDays").querySelectorAll(".day-pill.active")].map((b) => Number(b.dataset.day));
-      callBackend("updateChannelField", drawerChKey, JSON.stringify({
+      const raw = await callBackend("updateChannelField", drawerChKey, JSON.stringify({
         auto_reconnect: $("#cdReconn").checked,
         auto_concat_parts: $("#cdConcat").checked,
         record_chat: $("#cdChat").checked,
@@ -1955,6 +1997,15 @@
         schedule_end: $("#cdSEnd").value.trim() || "23:59",
         schedule_days: days,
       }));
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed.channels)) {
+            state.channels = parsed.channels;
+            if (state.page === "live") renderLivePage();
+          }
+        } catch {}
+      }
       showToast("Параметры канала сохранены", "", "success");
       close();
     };
@@ -2065,7 +2116,15 @@
   }
 
   // ==================== BACKEND EVENT DISPATCHER ====================
+  let _lastEventRaw = "";
+  let _lastEventTime = 0;
+
   function handleBackendEvent(raw) {
+    const now = Date.now();
+    if (raw === _lastEventRaw && now - _lastEventTime < 45) return;
+    _lastEventRaw = raw;
+    _lastEventTime = now;
+
     let ev;
     try { ev = JSON.parse(raw); } catch { return; }
     const { type, data } = ev;
@@ -2255,6 +2314,7 @@
 
     initBlurStudioEvents();
     initDrawerEvents();
+    window.__trDispatch = handleBackendEvent;
 
     // Connect QWebChannel to Python backend
     if (typeof QWebChannel !== "undefined" && window.qt && window.qt.webChannelTransport) {
@@ -2274,6 +2334,9 @@
         applyDiagnosticsUi();
         renderUpdateBanner();
         renderCurrentPage();
+        if (state.channels.length > 0) {
+          callBackend("checkChannels");
+        }
       });
     }
   }

@@ -379,37 +379,78 @@ def capture_live_snapshot(
     ffmpeg = get_ffmpeg_path()
 
     if streamlink_cmd and ffmpeg:
+        # Method 1: Resolve HLS stream URL via Streamlink and extract 1 frame via FFmpeg
         try:
             cmd = [*streamlink_cmd, "--stream-url"]
             if ch.platform == "twitch":
                 cmd.append("--twitch-disable-ads")
             if proxy_url.strip():
                 cmd.extend(["--http-proxy", proxy_url.strip()])
-            cmd.extend([ch.stream_url, quality])
-            url_res = subprocess.run(cmd, capture_output=True, text=True, timeout=20, creationflags=CREATE_NO_WINDOW)
-            stream_url = (url_res.stdout or "").strip().splitlines()
+            cmd.extend([ch.stream_url, f"{quality},best" if quality != "best" else "best"])
+            url_res = subprocess.run(cmd, capture_output=True, text=True, timeout=18, creationflags=CREATE_NO_WINDOW)
+            stream_url = [line.strip() for line in (url_res.stdout or "").splitlines() if line.strip().startswith("http")]
             if url_res.returncode == 0 and stream_url:
-                hls_url = stream_url[-1].strip()
+                hls_url = stream_url[-1]
                 ff_res = subprocess.run(
                     [
                         ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                         "-i", hls_url, "-frames:v", "1", "-q:v", "2", output_jpg,
                     ],
-                    capture_output=True, text=True, timeout=25, creationflags=CREATE_NO_WINDOW,
+                    capture_output=True, text=True, timeout=20, creationflags=CREATE_NO_WINDOW,
                 )
-                if ff_res.returncode == 0 and os.path.exists(output_jpg) and os.path.getsize(output_jpg) > 0:
-                    return True, "Кадр захвачен напрямую со стрима"
+                if ff_res.returncode == 0 and os.path.exists(output_jpg) and os.path.getsize(output_jpg) > 1000:
+                    return True, "Кадр захвачен напрямую со стрима (1080p)"
+        except Exception:
+            pass
+
+        # Method 2: Pipe Streamlink stdout directly into FFmpeg stdin (bypasses any FFmpeg HTTPS/TLS issues)
+        try:
+            sl_args = [*streamlink_cmd, "--stdout", "--quiet"]
+            if ch.platform == "twitch":
+                sl_args.append("--twitch-disable-ads")
+            if proxy_url.strip():
+                sl_args.extend(["--http-proxy", proxy_url.strip()])
+            sl_args.extend([ch.stream_url, f"{quality},best" if quality != "best" else "best"])
+            sl_proc = subprocess.Popen(
+                sl_args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW
+            )
+            try:
+                ff_proc = subprocess.Popen(
+                    [
+                        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                        "-i", "pipe:0", "-frames:v", "1", "-q:v", "2", output_jpg,
+                    ],
+                    stdin=sl_proc.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                if sl_proc.stdout:
+                    sl_proc.stdout.close()
+                ff_proc.wait(timeout=18)
+            finally:
+                try:
+                    sl_proc.kill()
+                except Exception:
+                    pass
+            if os.path.exists(output_jpg) and os.path.getsize(output_jpg) > 1000:
+                return True, "Кадр захвачен напрямую со стрима"
         except Exception:
             pass
 
     if ch.platform == "twitch":
         try:
-            preview_url = f"https://static-cdn.jtvnw.net/previews-ttv/live_user_{ch.username}-1920x1080.jpg"
-            r = requests.get(preview_url, timeout=10, proxies=_requests_proxies(proxy_url))
-            if r.status_code == 200 and len(r.content) > 5000:
+            preview_url = f"https://static-cdn.jtvnw.net/previews-ttv/live_user_{ch.username.lower()}-1920x1080.jpg"
+            r = requests.get(
+                preview_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10,
+                proxies=_requests_proxies(proxy_url),
+                allow_redirects=True,
+            )
+            # Note: Twitch redirects offline channels to 404_preview-1920x1080.jpg (~2-4KB)
+            if r.status_code == 200 and len(r.content) > 5000 and "404_preview" not in (r.url or ""):
                 with open(output_jpg, "wb") as f:
                     f.write(r.content)
-                return True, "Загружено превью прямого эфира Twitch"
+                return True, "Загружен живой кадр прямого эфира Twitch"
         except Exception:
             pass
 

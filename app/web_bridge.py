@@ -366,11 +366,14 @@ class AppBridge(QObject):
 
     event = Signal(str)           # Emits JSON {"type": ..., "data": ...} to JS
     recordingCountChanged = Signal(int)
+    _mainThreadEmit = Signal(str, object)
 
     def __init__(self, parent_window: QWidget, media_server: LocalMediaServer):
         super().__init__(parent_window)
         self._win = parent_window
         self._media = media_server
+        self._web_page = None
+        self._mainThreadEmit.connect(self._emit_on_main_thread)
 
         self.config = AppConfig.load()
         self._encoders: List[str] = ["libx264"]
@@ -409,11 +412,10 @@ class AppBridge(QObject):
         }
         self._aux_workers: List[QThread] = []
 
-        # Timers
+        # Timers — always poll online statuses so channel cards stay live even when auto-record is paused
         self.monitor_timer = QTimer(self)
         self.monitor_timer.timeout.connect(self.checkChannels)
-        if self.config.auto_monitor_enabled:
-            self.monitor_timer.start(self.config.check_interval_sec * 1000)
+        self.monitor_timer.start(max(10, self.config.check_interval_sec) * 1000)
 
         self.queue_timer = QTimer(self)
         self.queue_timer.timeout.connect(lambda: self._pump_blur_queue(force=False))
@@ -443,16 +445,22 @@ class AppBridge(QObject):
             self,
         )
         self._startup_worker.encoders_ready.connect(self._on_encoders_ready)
-        self._startup_worker.cleanup_done.connect(
-            lambda cnt, gb: self._log(f"[Авто-очистка] Удалено старых файлов: {cnt} ({gb:.2f} ГБ)")
-        )
-        self._startup_worker.finished.connect(lambda: self._cleanup_aux(self._startup_worker))
+        self._startup_worker.cleanup_done.connect(self._on_startup_cleanup_done)
+        self._startup_worker.finished.connect(self._startup_worker.deleteLater)
         self._aux_workers.append(self._startup_worker)
         self._startup_worker.start()
 
         self._log("Ядро запущено. Определение аппаратных видеокодеков...")
+        self._monitor_pending = False
         QTimer.singleShot(900, self.checkChannels)
         QTimer.singleShot(4000, self._auto_check_updates)
+
+    def bind_web_page(self, page) -> None:
+        self._web_page = page
+
+    @Slot(int, float)
+    def _on_startup_cleanup_done(self, cnt: int, gb: float) -> None:
+        self._log(f"[Авто-очистка] Удалено старых файлов: {cnt} ({gb:.2f} ГБ)")
 
     def _register_configured_media_files(self) -> None:
         for ch in self.config.channels:
@@ -497,9 +505,22 @@ class AppBridge(QObject):
         self._log(f"Кодеки готовы: {', '.join(self._encoders)} (активный: {diag['active_encoder']})")
         self._emit("diagnostics", diag)
 
+    @Slot(str, object)
+    def _emit_on_main_thread(self, ev_type: str, data) -> None:
+        self._emit(ev_type, data)
+
     def _emit(self, ev_type: str, data) -> None:
+        if QThread.currentThread() != self.thread():
+            self._mainThreadEmit.emit(ev_type, data)
+            return
         try:
-            self.event.emit(json.dumps({"type": ev_type, "data": data}, ensure_ascii=False))
+            payload = json.dumps({"type": ev_type, "data": data}, ensure_ascii=False)
+            self.event.emit(payload)
+            if self._web_page is not None:
+                js_arg = json.dumps(payload, ensure_ascii=False)
+                self._web_page.runJavaScript(
+                    f"window.__trDispatch && window.__trDispatch({js_arg});"
+                )
         except Exception:
             pass
 
@@ -638,22 +659,23 @@ class AppBridge(QObject):
             self._log(f"Добавлены каналы: {', '.join(added)}")
             self._toast("Каналы добавлены", ", ".join(added), "success")
             self.checkChannels()
-        return json.dumps({"added": added}, ensure_ascii=False)
+        return json.dumps({"added": added, "channels": self._serialize_channels()}, ensure_ascii=False)
 
-    @Slot(str)
-    def deleteChannel(self, key: str) -> None:
+    @Slot(str, result=str)
+    def deleteChannel(self, key: str) -> str:
         if key in self.live_recorders:
             self.stopRecording(key)
         self.config.channels = [c for c in self.config.channels if c.key != key]
         self.config.save()
         self._push_channels()
         self._toast("Канал удалён", key, "info")
+        return json.dumps({"channels": self._serialize_channels()}, ensure_ascii=False)
 
-    @Slot(str, str)
-    def updateChannelField(self, key: str, patch_json: str) -> None:
+    @Slot(str, str, result=str)
+    def updateChannelField(self, key: str, patch_json: str) -> str:
         ch = self.config.get_channel(key)
         if not ch:
-            return
+            return json.dumps({"channels": self._serialize_channels()}, ensure_ascii=False)
         patch = json.loads(patch_json)
         for field_name in (
             "quality", "blur_mode", "auto_record", "active_preset",
@@ -667,12 +689,13 @@ class AppBridge(QObject):
             self.manually_stopped.discard(key)
         self.config.save()
         self._push_channels()
+        return json.dumps({"channels": self._serialize_channels()}, ensure_ascii=False)
 
-    @Slot(str, str, str)
-    def saveChannelBlurPresets(self, key: str, presets_json: str, active_preset: str) -> None:
+    @Slot(str, str, str, result=str)
+    def saveChannelBlurPresets(self, key: str, presets_json: str, active_preset: str) -> str:
         ch = self.config.get_channel(key)
         if not ch:
-            return
+            return json.dumps({"channels": self._serialize_channels()}, ensure_ascii=False)
         raw_presets = json.loads(presets_json)
         parsed: Dict[str, List[BlurRegion]] = {}
         for pname, rlist in raw_presets.items():
@@ -687,65 +710,73 @@ class AppBridge(QObject):
         self.config.save()
         self._push_channels()
         self._toast("Зоны блюра сохранены", f"{ch.username} · сцена «{ch.active_preset}» ({len(ch.blur_regions)} зон)", "success")
+        return json.dumps({"channels": self._serialize_channels()}, ensure_ascii=False)
 
     @Slot()
     def checkChannels(self) -> None:
         if not self.config.channels:
             return
         if self._monitor_worker and self._monitor_worker.isRunning():
+            self._monitor_pending = True
             return
+        self._monitor_pending = False
         self._monitor_worker = ChannelMonitorWorker(deepcopy(self.config.channels), deepcopy(self.config), self)
         self._monitor_worker.statuses_ready.connect(self._on_statuses_ready)
         self._monitor_worker.log_message.connect(self._log)
         self._monitor_worker.start()
 
+    @Slot(dict)
     def _on_statuses_ready(self, statuses: Dict[str, StreamStatus]) -> None:
-        if not statuses:
-            return
-        self.statuses.update(statuses)
-        thumb_targets: Dict[str, str] = {}
-        for ch in self.config.channels:
-            st = statuses.get(ch.key)
-            if not st:
-                continue
-            if not st.is_live:
-                self.manually_stopped.discard(ch.key)
-            elif st.preview_url:
-                thumb_targets[ch.key] = st.preview_url
+        if statuses:
+            self.statuses.update(statuses)
+            thumb_targets: Dict[str, str] = {}
+            for ch in self.config.channels:
+                st = statuses.get(ch.key)
+                if not st:
+                    continue
+                if st.error:
+                    self._log(f"[Статус {ch.username}] {st.error}")
+                if not st.is_live:
+                    self.manually_stopped.discard(ch.key)
+                elif st.preview_url:
+                    thumb_targets[ch.key] = st.preview_url
 
-            if (
-                self.config.auto_monitor_enabled
-                and ch.auto_record
-                and st.is_live
-                and ch.key not in self.live_recorders
-                and ch.key not in self.manually_stopped
-                and ch.is_within_schedule()
-                and ch.matches_filters(st.game, st.title)
-            ):
-                self._log(f"[Автомониторинг] {ch.username} вышел в эфир! Запуск записи...")
-                self.startRecording(ch.key)
+                if (
+                    self.config.auto_monitor_enabled
+                    and ch.auto_record
+                    and st.is_live
+                    and ch.key not in self.live_recorders
+                    and ch.key not in self.manually_stopped
+                    and ch.is_within_schedule()
+                    and ch.matches_filters(st.game, st.title)
+                ):
+                    self._log(f"[Автомониторинг] {ch.username} вышел в эфир! Запуск записи...")
+                    self.startRecording(ch.key)
 
-        self._push_channels()
-        if thumb_targets and not (self._thumb_worker and self._thumb_worker.isRunning()):
-            self._thumb_worker = _ThumbWorker(thumb_targets, self.config.proxy_url, self)
-            self._thumb_worker.ready.connect(self._on_thumb_ready)
-            self._thumb_worker.start()
+            self._push_channels()
+            if thumb_targets and not (self._thumb_worker and self._thumb_worker.isRunning()):
+                self._thumb_worker = _ThumbWorker(thumb_targets, self.config.proxy_url, self)
+                self._thumb_worker.ready.connect(self._on_thumb_ready)
+                self._thumb_worker.start()
+        if getattr(self, "_monitor_pending", False):
+            self._monitor_pending = False
+            QTimer.singleShot(250, self.checkChannels)
 
+    @Slot(str, bytes)
     def _on_thumb_ready(self, key: str, raw: bytes) -> None:
         self._media.set_live_preview(key, raw)
         self._emit("preview_updated", {"key": key, "ts": int(datetime.now().timestamp() * 1000)})
 
-    @Slot(bool)
-    def setAutoMonitor(self, enabled: bool) -> None:
+    @Slot(bool, result=str)
+    def setAutoMonitor(self, enabled: bool) -> str:
         self.config.auto_monitor_enabled = bool(enabled)
         self.config.save()
+        self.monitor_timer.start(max(10, self.config.check_interval_sec) * 1000)
         if enabled:
-            self.monitor_timer.start(self.config.check_interval_sec * 1000)
             self.checkChannels()
-        else:
-            self.monitor_timer.stop()
         self._emit("config", asdict(self.config))
         self._toast("Автомониторинг", "Включён" if enabled else "Приостановлен", "info")
+        return json.dumps(asdict(self.config), ensure_ascii=False)
 
     @Slot(str)
     def startRecording(self, key: str) -> None:
@@ -843,20 +874,20 @@ class AppBridge(QObject):
                     self._enqueue_blur_job(fp, ch.blur_regions, delete_original=not ch.keep_original, normalize_audio=self.config.normalize_audio_default, force_now=False)
 
     # ------------------------------------------------------------------ Snapshots & AI Template Capture
+    @Slot(str, bool, str, str)
+    def _on_snapshot_ready(self, rid: str, ok: bool, path: str, msg: str) -> None:
+        if ok and path:
+            self.allow_media_file(path)
+        self._emit("snapshot", {"req_id": rid, "ok": ok, "path": path, "message": msg})
+
     @Slot(str, str, float, result=str)
     def requestSnapshot(self, mode: str, target_str: str, ts_sec: float) -> str:
         req_id = uuid.uuid4().hex[:8]
         target = self.config.get_channel(target_str) if mode == "live" else target_str
         quality = target.quality if isinstance(target, ChannelConfig) else "best"
         w = _SnapWorker(req_id, mode, target or target_str, ts_sec, quality, self.config.proxy_url, self)
-
-        def _on_snap_ready(rid: str, ok: bool, path: str, msg: str) -> None:
-            if ok and path:
-                self.allow_media_file(path)
-            self._emit("snapshot", {"req_id": rid, "ok": ok, "path": path, "message": msg})
-
-        w.ready.connect(_on_snap_ready)
-        w.finished.connect(lambda wk=w: self._cleanup_aux(wk))
+        w.ready.connect(self._on_snapshot_ready)
+        w.finished.connect(w.deleteLater)
         self._aux_workers.append(w)
         w.start()
         return req_id
@@ -902,11 +933,15 @@ class AppBridge(QObject):
         w.deleteLater()
 
     # ------------------------------------------------------------------ VOD & Clips Browser
+    @Slot(str, list, str)
+    def _on_catalog_ready(self, k: str, items: list, err: str) -> None:
+        self._emit("catalog", {"kind": k, "items": items, "error": err})
+
     @Slot(str, str, str)
     def fetchCatalog(self, kind: str, username: str, period: str) -> None:
         w = _CatalogWorker(kind, username, period or "LAST_WEEK", self.config.twitch_oauth_token, self.config.proxy_url, self)
-        w.ready.connect(lambda k, items, err: self._emit("catalog", {"kind": k, "items": items, "error": err}))
-        w.finished.connect(lambda wk=w: self._cleanup_aux(wk))
+        w.ready.connect(self._on_catalog_ready)
+        w.finished.connect(w.deleteLater)
         self._aux_workers.append(w)
         w.start()
 
@@ -1044,6 +1079,10 @@ class AppBridge(QObject):
             )
         self._toast("Пакетный блюр", f"Добавлено в очередь GPU: {len(paths)} файлов", "success")
 
+    @Slot(list, str)
+    def _on_banner_test_ready(self, ivs: list, lbl: str) -> None:
+        self._emit("banner_test", {"intervals": ivs, "label": lbl})
+
     @Slot(str, str)
     def testBannerDetect(self, video_path: str, region_json: str) -> None:
         """Preview OpenCV banner auto-detection intervals directly inside Blur Studio (#13)."""
@@ -1056,8 +1095,8 @@ class AppBridge(QObject):
             return
         self._toast("Тест AI-детектора", f"Сканируем видео для «{r.label}»...", "info")
         w = _BannerTestWorker(video_path, r, self)
-        w.ready.connect(lambda ivs, lbl: self._emit("banner_test", {"intervals": ivs, "label": lbl}))
-        w.finished.connect(lambda wk=w: self._cleanup_aux(wk))
+        w.ready.connect(self._on_banner_test_ready)
+        w.finished.connect(w.deleteLater)
         self._aux_workers.append(w)
         w.start()
 
@@ -1161,13 +1200,17 @@ class AppBridge(QObject):
                 w.request_stop()
 
     # ------------------------------------------------------------------ Library (#28, #47, #51)
+    @Slot(list, dict)
+    def _on_library_ready(self, items: list, stats: dict) -> None:
+        self._emit("library", {"items": items, "stats": stats})
+
     @Slot()
     def scanLibrary(self) -> None:
         if self._lib_worker and self._lib_worker.isRunning():
             return
         root = self.config.ensure_output_dir()
         self._lib_worker = _LibraryScanWorker(root, self)
-        self._lib_worker.ready.connect(lambda items, stats: self._emit("library", {"items": items, "stats": stats}))
+        self._lib_worker.ready.connect(self._on_library_ready)
         self._lib_worker.start()
 
     @Slot()
@@ -1224,16 +1267,31 @@ class AppBridge(QObject):
         return False
 
     # ------------------------------------------------------------------ Studio & AI (#6, #8, #16-#26, #30, #33)
+    @Slot(str, list, list)
+    def _on_highlights_ready(self, m: str, hm: list, hl: list) -> None:
+        self._emit("highlights", {"mode": m, "heatmap": hm, "highlights": hl})
+
     @Slot(str, str)
     def analyzeHighlights(self, mode: str, target_path: str) -> None:
         if not target_path or not os.path.exists(target_path):
             self._toast("Файл не найден", "Укажите видео или .chat.json", "error")
             return
         w = _HighlightsWorker(mode, target_path, self)
-        w.ready.connect(lambda m, hm, hl: self._emit("highlights", {"mode": m, "heatmap": hm, "highlights": hl}))
-        w.finished.connect(lambda wk=w: self._cleanup_aux(wk))
+        w.ready.connect(self._on_highlights_ready)
+        w.finished.connect(w.deleteLater)
         self._aux_workers.append(w)
         w.start()
+
+    @Slot(bool, str, str, int)
+    def _on_vod_chat_done(self, ok: bool, jpath: str, msg: str, cnt: int) -> None:
+        if ok and jpath:
+            self.allow_media_file(jpath)
+            self._log(f"[Чат VOD] {msg}")
+            self._toast("Чат VOD загружен", msg, "success")
+            self._emit("vod_chat_ready", {"ok": True, "json_path": jpath, "count": cnt, "message": msg})
+        else:
+            self._toast("Чат VOD", msg, "error")
+            self._emit("vod_chat_ready", {"ok": False, "json_path": "", "count": 0, "message": msg})
 
     @Slot(str, str)
     def downloadVodChat(self, vod_url: str, video_path: str) -> None:
@@ -1245,19 +1303,8 @@ class AppBridge(QObject):
         Path(base).parent.mkdir(parents=True, exist_ok=True)
         self._toast("Загрузка чата VOD", "Скачиваем сообщения из Twitch GQL...", "info")
         w = _VodChatWorker(vod_url, base, deepcopy(self.config), self)
-
-        def _done(ok: bool, jpath: str, msg: str, cnt: int) -> None:
-            if ok and jpath:
-                self.allow_media_file(jpath)
-                self._log(f"[Чат VOD] {msg}")
-                self._toast("Чат VOD загружен", msg, "success")
-                self._emit("vod_chat_ready", {"ok": True, "json_path": jpath, "count": cnt, "message": msg})
-            else:
-                self._toast("Чат VOD", msg, "error")
-                self._emit("vod_chat_ready", {"ok": False, "json_path": "", "count": 0, "message": msg})
-
-        w.ready.connect(_done)
-        w.finished.connect(lambda wk=w: self._cleanup_aux(wk))
+        w.ready.connect(self._on_vod_chat_done)
+        w.finished.connect(w.deleteLater)
         self._aux_workers.append(w)
         w.start()
 
@@ -1279,6 +1326,10 @@ class AppBridge(QObject):
         except Exception as exc:
             self._toast("Ошибка EDL", str(exc), "error")
 
+    @Slot(bool, dict)
+    def _on_yt_meta_ready(self, ok: bool, data: dict) -> None:
+        self._emit("yt_meta", {"ok": ok, **data})
+
     @Slot(str)
     def generateYouTubeMeta(self, video_path: str) -> None:
         """Generate YouTube titles, description, tags, and chapters via LLM or local heuristics (#26)."""
@@ -1287,8 +1338,8 @@ class AppBridge(QObject):
             return
         self._toast("AI YouTube", "Генерируем заголовки, описание и таймкоды...", "info")
         w = _YtMetaWorker(video_path, deepcopy(self.config), self)
-        w.ready.connect(lambda ok, data: self._emit("yt_meta", {"ok": ok, **data}))
-        w.finished.connect(lambda wk=w: self._cleanup_aux(wk))
+        w.ready.connect(self._on_yt_meta_ready)
+        w.finished.connect(w.deleteLater)
         self._aux_workers.append(w)
         w.start()
 
@@ -1395,8 +1446,7 @@ class AppBridge(QObject):
         self.config.save()
         set_windows_autostart(self.config.start_with_windows)
         self._hotkey.set_key(self.config.marker_hotkey)
-        if self.config.auto_monitor_enabled:
-            self.monitor_timer.start(self.config.check_interval_sec * 1000)
+        self.monitor_timer.start(max(10, self.config.check_interval_sec) * 1000)
         self._sync_telegram_bot()
         self._emit("config", asdict(self.config))
         self._emit("diagnostics", self._build_diagnostics())
@@ -1549,21 +1599,23 @@ class AppBridge(QObject):
             self._tg_reply(f"Загрузка VOD поставлена в очередь:\n{arg}")
         elif cmd == "/snap" and arg:
             ch = self.config.get_channel(arg) or ChannelConfig(username=arg.strip().lower(), platform="twitch")
-            out_jpg = os.path.join(tempfile.gettempdir(), f"tr_tgsnap_{uuid.uuid4().hex[:6]}.jpg")
-            w = _SnapWorker(uuid.uuid4().hex[:6], "live", ch, 0.0, ch.quality, self.config.proxy_url, self)
-
-            def _send_snap(_rid: str, ok: bool, path: str, msg: str) -> None:
-                if ok and path and os.path.exists(path):
-                    self._tg_reply(f"Кадр: {ch.username}", photo_path=path)
-                else:
-                    self._tg_reply(f"Не удалось снять кадр {ch.username}: {msg}")
-
-            w.ready.connect(_send_snap)
-            w.finished.connect(lambda wk=w: self._cleanup_aux(wk))
-            self._aux_workers.append(w)
-            w.start()
+            self._start_tg_snap(ch)
         else:
             self._tg_reply("Неизвестная команда. Отправьте /help")
+
+    @Slot(str, bool, str, str)
+    def _on_tg_snap_ready(self, _rid: str, ok: bool, path: str, msg: str) -> None:
+        if ok and path and os.path.exists(path):
+            self._tg_reply("Кадр прямого эфира", photo_path=path)
+        else:
+            self._tg_reply(f"Не удалось снять кадр: {msg}")
+
+    def _start_tg_snap(self, ch: ChannelConfig) -> None:
+        w = _SnapWorker(uuid.uuid4().hex[:6], "live", ch, 0.0, ch.quality, self.config.proxy_url, self)
+        w.ready.connect(self._on_tg_snap_ready)
+        w.finished.connect(w.deleteLater)
+        self._aux_workers.append(w)
+        w.start()
 
     # ------------------------------------------------------------------ Cloud Updates (GitHub Releases)
     def _push_update_state(self) -> None:
