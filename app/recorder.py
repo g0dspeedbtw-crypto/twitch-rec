@@ -404,7 +404,18 @@ class LiveRecorderWorker(QThread):
         key = self.channel.key
         uname = self.channel.username
 
-        sl_cmd = [*streamlink_cmd, "--stdout", "--hls-live-restart", "--retry-streams", "4", "--retry-max", "3"]
+        sl_cmd = [
+            *streamlink_cmd,
+            "--stdout",
+            "--hls-live-restart",
+            "--ringbuffer-size", "32M",
+            "--hls-segment-timeout", "15",
+            "--hls-timeout", "30",
+            "--hls-segment-attempts", "4",
+            "--stream-segment-threads", "2",
+            "--retry-streams", "4",
+            "--retry-max", "3",
+        ]
         if self.channel.platform == "twitch":
             # Request Twitch Enhanced Broadcasting (HEVC / 1440p60 / high-bitrate 1080p60) when available
             sl_cmd.append("--twitch-supported-codecs=h265,h264")
@@ -455,6 +466,8 @@ class LiveRecorderWorker(QThread):
                 ff_cmd.extend(["-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof"])
             self.log_message.emit(f"[{uname}] Авто-разбивка записи: по {self.channel.segment_minutes} мин.")
         elif ext == "mp4":
+            if not use_realtime_blur:
+                ff_cmd.extend(["-bsf:a", "aac_adtstoasc"])
             ff_cmd.extend(["-movflags", "+frag_keyframe+empty_moov+default_base_moof"])
 
         ff_cmd.append(out_pattern)
@@ -489,7 +502,30 @@ class LiveRecorderWorker(QThread):
             started = False
             last_emit = 0.0
             pass_start = time.time()
+            last_progress_ts = [time.time()]
+            wd_stop = threading.Event()
             last_errs: List[str] = []
+
+            def _stall_watchdog() -> None:
+                while not wd_stop.wait(5.0):
+                    if self._stop_requested:
+                        return
+                    idle_s = time.time() - last_progress_ts[0]
+                    limit_s = 50.0 if started else 45.0
+                    if idle_s >= limit_s:
+                        self.log_message.emit(
+                            f"[{uname}] [Watchdog] Поток завис ({int(idle_s)}с без данных) — перезапуск соединения..."
+                        )
+                        for p in (self._sl_proc, self._ff_proc):
+                            if p and p.poll() is None:
+                                try:
+                                    p.terminate()
+                                except Exception:
+                                    pass
+                        return
+
+            wd_thread = threading.Thread(target=_stall_watchdog, daemon=True)
+            wd_thread.start()
 
             assert self._ff_proc.stderr is not None
             buf = ""
@@ -503,6 +539,7 @@ class LiveRecorderWorker(QThread):
                     if not line:
                         continue
                     if "time=" in line:
+                        last_progress_ts[0] = time.time()
                         if not started:
                             started = True
                             self.status_changed.emit(key, "Запись (блюр)" if use_realtime_blur else "Запись")
@@ -533,6 +570,7 @@ class LiveRecorderWorker(QThread):
                 else:
                     buf += ch
 
+            wd_stop.set()
             try:
                 self._ff_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:

@@ -467,6 +467,10 @@ class AppBridge(QObject):
         self._res_monitor.stats_ready.connect(self._on_resource_stats)
         self._res_monitor.start()
 
+        # System sleep prevention during active recordings & renders
+        from app.services import SleepInhibitor
+        self._sleep_inhibitor = SleepInhibitor()
+
         # Global F9 Hotkey (#19)
         self._hotkey = GlobalHotkeyMonitor(self.config.marker_hotkey, self)
         self._hotkey.triggered.connect(self._on_global_marker)
@@ -2014,6 +2018,7 @@ class AppBridge(QObject):
 
     # ------------------------------------------------------------------ Resource Stats, Game Mode, Hard Disk Guard & Shutdown
     def _on_resource_stats(self, snap: ResourceSnapshot) -> None:
+        self._sleep_inhibitor.set_active(self.active_count() > 0)
         self._disk_free_gb = float(snap.disk_free_gb or 0.0)
         prev_game = self._active_game
         self._active_game = snap.active_game or ""
@@ -2040,6 +2045,7 @@ class AppBridge(QObject):
         return len(self.live_recorders) + len(self.vod_workers) + len(self.blur_workers) + len(self.studio_workers)
 
     def shutdown(self) -> None:
+        self._sleep_inhibitor.release()
         self.monitor_timer.stop()
         self.queue_timer.stop()
         self._res_monitor.stop()

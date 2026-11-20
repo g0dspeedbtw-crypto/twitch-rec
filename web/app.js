@@ -782,6 +782,8 @@
   // ==================== PAGE 5: PRO STUDIO 3.0 NLE WORKSPACE ====================
   let _studioLoadedSrc = "";
   let _studioProbedFile = "";
+  let _studioTlMoveHandler = null;
+  let _studioTlUpHandler = null;
 
   async function loadStudioVideo(path) {
     if (!path) return;
@@ -1080,8 +1082,12 @@
         mon.currentTime = t;
       }
     };
-    window.addEventListener("mousemove", onTlMove);
-    window.addEventListener("mouseup", () => { tlDrag = null; });
+    if (_studioTlMoveHandler) window.removeEventListener("mousemove", _studioTlMoveHandler);
+    if (_studioTlUpHandler) window.removeEventListener("mouseup", _studioTlUpHandler);
+    _studioTlMoveHandler = onTlMove;
+    _studioTlUpHandler = () => { tlDrag = null; };
+    window.addEventListener("mousemove", _studioTlMoveHandler);
+    window.addEventListener("mouseup", _studioTlUpHandler);
 
     $("#tlBtnIn").onclick = () => {
       state.studioIn = Math.min(mon.currentTime || 0, Math.max(0, state.studioOut - 0.5));

@@ -629,3 +629,55 @@ class TelegramBotWorker(QThread):
                     if not self._running:
                         break
                     time.sleep(0.1)
+
+
+# ------------------------------------------------------------------ System Sleep Prevention (macOS & Windows)
+class SleepInhibitor:
+    """Prevents macOS (caffeinate) and Windows (SetThreadExecutionState) from sleeping while recording/rendering."""
+
+    def __init__(self) -> None:
+        self._active = False
+        self._proc: Optional[subprocess.Popen] = None
+
+    def set_active(self, active: bool) -> None:
+        active = bool(active)
+        if active == self._active:
+            return
+        self._active = active
+        if sys.platform == "darwin":
+            if active:
+                try:
+                    self._proc = subprocess.Popen(
+                        ["caffeinate", "-i", "-m", "-s", "-w", str(os.getpid())],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    self._proc = None
+            else:
+                self._stop_mac()
+        elif os.name == "nt":
+            try:
+                import ctypes
+                ES_CONTINUOUS = 0x80000000
+                ES_SYSTEM_REQUIRED = 0x00000001
+                flags = (ES_CONTINUOUS | ES_SYSTEM_REQUIRED) if active else ES_CONTINUOUS
+                ctypes.windll.kernel32.SetThreadExecutionState(flags)
+            except Exception:
+                pass
+
+    def _stop_mac(self) -> None:
+        p = self._proc
+        self._proc = None
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+                p.wait(timeout=1.5)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+
+    def release(self) -> None:
+        self.set_active(False)
