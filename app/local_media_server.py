@@ -252,7 +252,7 @@ class LocalMediaServer:
                         sl_args.append(f"--twitch-api-header=Authorization=OAuth {oauth}")
                     proxy = getattr(cfg, "proxy_url", "") or ""
                     if proxy:
-                        sl_args.extend(["--http-proxy", proxy, "--https-proxy", proxy])
+                        sl_args.extend(["--http-proxy", proxy])
                 sl_args.extend([stream_url, qual_chain])
 
                 ff_args = [
