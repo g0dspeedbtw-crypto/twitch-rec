@@ -2907,7 +2907,7 @@
             <div class="field"><label>WebDAV Логин</label><input class="input" id="cfgWebdavUser" value="${esc(c.cloud_webdav_user || "")}" placeholder="user@yandex.ru" /></div>
             <div class="field"><label>WebDAV Пароль приложения</label><input type="password" class="input" id="cfgWebdavPass" value="${esc(c.cloud_webdav_pass || "")}" placeholder="Пароль приложения" /></div>
           </div>
-          <label class="switch-inline"><input type="checkbox" id="cfgCloudDelLoc" ${c.cloud_delete_local_after ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12.5px;">Удалять локальный файл после успешной выгрузки в облако</span></label>
+          <label class="switch-inline"><input type="checkbox" id="cfgCloudDelLoc" ${c.cloud_delete_local_after_upload ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12.5px;">Удалять локальный файл после успешной выгрузки в облако</span></label>
         </div>
 
         <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:14px;">
@@ -3028,7 +3028,7 @@
       cloud_webdav_url: $("#cfgWebdavUrl")?.value.trim() || "",
       cloud_webdav_user: $("#cfgWebdavUser")?.value.trim() || "",
       cloud_webdav_pass: $("#cfgWebdavPass")?.value || "",
-      cloud_delete_local_after: $("#cfgCloudDelLoc")?.checked || false,
+      cloud_delete_local_after_upload: $("#cfgCloudDelLoc")?.checked || false,
       obs_ws_host: $("#cfgObsHost")?.value.trim() || "127.0.0.1",
       obs_ws_port: Math.max(1, Number($("#cfgObsPort")?.value) || 4455),
       obs_ws_password: $("#cfgObsPass")?.value || "",

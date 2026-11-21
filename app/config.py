@@ -42,7 +42,7 @@ def get_data_dir() -> Path:
 
 BASE_DIR = get_resource_dir()
 DATA_DIR = get_data_dir()
-APP_VERSION = "5.0.0"
+APP_VERSION = "5.0.1"
 DEFAULT_GITHUB_REPO = "g0dspeedbtw-crypto/twitch-rec"
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -615,7 +615,7 @@ class AppConfig:
             cloud_webdav_url=str(raw.get("cloud_webdav_url", "")),
             cloud_webdav_user=str(raw.get("cloud_webdav_user", "")),
             cloud_webdav_pass=str(raw.get("cloud_webdav_pass", "")),
-            cloud_delete_local_after=bool(raw.get("cloud_delete_local_after", False)),
+            cloud_delete_local_after_upload=bool(raw.get("cloud_delete_local_after_upload", False)),
             obs_ws_host=str(raw.get("obs_ws_host", "127.0.0.1")),
             obs_ws_port=max(1, int(raw.get("obs_ws_port", 4455))),
             obs_ws_password=str(raw.get("obs_ws_password", "")),

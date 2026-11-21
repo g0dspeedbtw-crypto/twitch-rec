@@ -139,23 +139,10 @@ class StudioDesktopWindow(QMainWindow):
         self._rebuild_tray_menu()
 
     def _set_webengine_eco(self, eco: bool) -> None:
-        """Freeze Chromium renderer when hidden in tray (near-0% CPU/GPU), resume instantly on restore."""
+        """Reduce background CPU/GPU footprint when hidden in tray without risking macOS WebEngine freeze."""
         try:
-            self.bridge.set_eco_mode(eco)
-        except Exception:
-            pass
-        try:
-            page = self.web.page()
-            if hasattr(page, "LifecycleState") and hasattr(page, "setLifecycleState"):
-                if eco:
-                    from PySide6.QtCore import QTimer
-                    QTimer.singleShot(350, lambda: (
-                        page.setLifecycleState(page.LifecycleState.Frozen)
-                        if (not self.isVisible() and not getattr(self, "_is_shutting_down", False))
-                        else None
-                    ))
-                else:
-                    page.setLifecycleState(page.LifecycleState.Active)
+            if hasattr(self, "bridge") and self.bridge:
+                self.bridge.set_eco_mode(eco)
         except Exception:
             pass
 
