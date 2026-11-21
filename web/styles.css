@@ -2688,3 +2688,146 @@ details.adv-group > summary:hover { background: rgba(255, 255, 255, 0.04); color
   flex-wrap: wrap;
 }
 .ch-secondary-row .btn { flex: 1; justify-content: center; font-size: 11.5px; padding: 5px 8px; }
+
+
+/* ==================== v5.1.4 LAYOUT & OVERFLOW INTEGRITY FIX ==================== */
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+.app-shell {
+  width: 100% !important;
+  height: 100% !important;
+  overflow: hidden !important;
+  display: flex;
+}
+.sidebar {
+  width: 248px !important;
+  min-width: 248px !important;
+  max-width: 248px !important;
+  height: 100% !important;
+  overflow: hidden !important;
+  padding: 14px 12px 12px !important;
+  box-sizing: border-box;
+}
+.sidebar > * {
+  min-width: 0;
+  max-width: 100%;
+  flex-shrink: 0;
+}
+.nav-scroll {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
+.nav-item {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-switcher {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+}
+.ws-switcher .input-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+}
+.sidebar-util-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 32px !important;
+  width: 100%;
+  min-width: 0;
+}
+.util-btn {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.main-content {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  height: 100% !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  box-sizing: border-box;
+}
+.page {
+  min-width: 0;
+  max-width: 1360px;
+  width: 100%;
+}
+.page-header {
+  flex-wrap: wrap !important;
+  gap: 12px !important;
+}
+.header-actions {
+  flex-wrap: wrap !important;
+  max-width: 100%;
+}
+
+/* Fix Drawer & <details class="adv-group"> flex-shrinking / clipping */
+.drawer {
+  width: min(500px, 92vw) !important;
+  height: 100vh !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+}
+.drawer-head, .drawer-foot {
+  flex-shrink: 0 !important;
+}
+.drawer-body {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 14px !important;
+}
+.drawer-body > *,
+.nle-inspector-card > *,
+.bs-inspector > * {
+  flex-shrink: 0 !important;
+  min-width: 0;
+}
+details.adv-group {
+  flex-shrink: 0 !important;
+  overflow: visible !important;
+  margin-top: 0 !important;
+}
+details.adv-group > summary {
+  line-height: 1.35;
+  gap: 8px;
+}
+.adv-body {
+  padding: 8px 14px 14px !important;
+}
+
+/* Prevent horizontal overflow on cards and form grids */
+.channel-card, .card, .media-card, .job-card {
+  min-width: 0;
+  max-width: 100%;
+}
+.ch-top, .ch-controls {
+  flex-wrap: wrap;
+}
+.ch-info {
+  min-width: 160px;
+}
+.form-grid-2, .form-grid-3, .form-grid-4 {
+  min-width: 0;
+}
+.form-grid-2 > *, .form-grid-3 > *, .form-grid-4 > * {
+  min-width: 0;
+}
