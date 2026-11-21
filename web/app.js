@@ -381,20 +381,23 @@
             <div class="ch-name-row">
               <span class="ch-name">${esc(ch.username)}</span>
               <span class="plat-tag plat-${esc(ch.platform)}">${esc(ch.platform)}</span>
-              ${segMin > 0 ? `<span class="plat-tag" style="background:rgba(139,92,246,0.18);color:var(--accent-light);">✂ ${segMin >= 60 && segMin % 60 === 0 ? `${segMin / 60}ч` : `${segMin}м`}</span>` : ""}
+              ${ch.autopilot_enabled ? `<span class="plat-tag" style="background:rgba(34,197,94,0.16);color:#4ade80;">🤖 Автопилот</span>` : ""}
+              ${segMin > 0 ? `<span class="plat-tag" style="background:rgba(124,58,237,0.16);color:var(--accent-light);">✂ ${segMin >= 60 && segMin % 60 === 0 ? `${segMin / 60}ч` : `${segMin}м`}</span>` : ""}
               ${ch.schedule_enabled ? `<span class="plat-tag" style="background:rgba(255,255,255,0.06);color:var(--text-secondary)">${esc(ch.schedule_start)}–${esc(ch.schedule_end)}</span>` : ""}
             </div>
             <div class="ch-game">${live ? esc(st.game || "Прямой эфир") : (st.error ? esc(st.error) : "Стример не в сети")}</div>
             <div class="ch-title" title="${esc(st.title || "")}">${live && st.title ? esc(st.title) : "Ожидание начала трансляции"}</div>
           </div>
           <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
-            ${rec
-              ? `<button class="btn btn-danger btn-sm act-stop">${iconSvg("stop", 12)}<span>Стоп</span></button>`
-              : `<button class="btn ${live ? "btn-success" : "btn-subtle"} btn-sm act-rec">${iconSvg("record", 12)}<span>Запись</span></button>`}
+            <div style="display:flex;gap:6px;">
+              ${live ? `<button class="btn btn-subtle btn-sm act-watch-live" title="Смотреть эфир без рекламы">${iconSvg("play", 12)}<span>Смотреть</span></button>` : ""}
+              ${rec
+                ? `<button class="btn btn-danger btn-sm act-stop">${iconSvg("stop", 12)}<span>Стоп</span></button>`
+                : `<button class="btn ${live ? "btn-primary" : "btn-subtle"} btn-sm act-rec">${iconSvg("record", 12)}<span>Записать</span></button>`}
+            </div>
             <div style="display:flex;gap:4px;">
-              ${live ? `<button class="btn-icon act-watch-live" title="Смотреть эфир в мини-плеере без рекламы">${iconSvg("play", 14)}</button>` : ""}
-              <button class="btn-icon act-settings" title="Параметры канала, расписание, чат, авто-клипы">${iconSvg("gear", 15)}</button>
-              <button class="btn-icon danger act-del" title="Удалить канал">${iconSvg("trash", 15)}</button>
+              <button class="btn btn-subtle btn-sm act-settings" style="padding:4px 9px;font-size:11.5px;" title="Настройки канала, автопилот, DMCA, расписание">${iconSvg("gear", 13)}<span>Настройки</span></button>
+              <button class="btn-icon danger act-del" title="Удалить канал">${iconSvg("trash", 14)}</button>
             </div>
           </div>
         </div>
@@ -4329,6 +4332,11 @@
       state.settingsDraft = null;
       applyTheme(data?.theme);
       if (state.page === "live") renderLivePage();
+    } else if (type === "app_eco") {
+      if (data?.eco) {
+        releaseStudioPlayer();
+        $("#page-multiview")?.querySelectorAll("video").forEach((v) => { v.pause(); v.removeAttribute("src"); v.load(); });
+      }
     } else if (type === "log") {
       state.logs.push(data.line);
       if (state.logs.length > 600) state.logs.shift();

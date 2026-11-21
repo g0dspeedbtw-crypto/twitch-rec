@@ -2891,6 +2891,18 @@ class AppBridge(QObject):
         from app.broadcast_suite import compute_analytics_dashboard
         return json.dumps(compute_analytics_dashboard(self.config.output_dir), ensure_ascii=False)
 
+    def set_eco_mode(self, enabled: bool) -> None:
+        """Reduce background CPU/GPU footprint when window is hidden in system tray."""
+        self._eco_mode = bool(enabled)
+        try:
+            if hasattr(self, "_res_monitor") and self._res_monitor:
+                self._res_monitor.set_eco_mode(self._eco_mode)
+        except Exception:
+            pass
+        if self._eco_mode:
+            # Release any active preview/multiview video streams when going to background
+            self._emit("app_eco", {"eco": True})
+
     def shutdown(self) -> None:
         if self._sleep_timer.isActive():
             self._sleep_timer.stop()

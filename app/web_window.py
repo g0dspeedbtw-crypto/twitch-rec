@@ -138,10 +138,41 @@ class StudioDesktopWindow(QMainWindow):
         self.tray.setToolTip(f"Twitch Recorder Pro — активных записей: {count}")
         self._rebuild_tray_menu()
 
+    def _set_webengine_eco(self, eco: bool) -> None:
+        """Freeze Chromium renderer when hidden in tray (near-0% CPU/GPU), resume instantly on restore."""
+        try:
+            self.bridge.set_eco_mode(eco)
+        except Exception:
+            pass
+        try:
+            page = self.web.page()
+            if hasattr(page, "LifecycleState") and hasattr(page, "setLifecycleState"):
+                if eco:
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(350, lambda: (
+                        page.setLifecycleState(page.LifecycleState.Frozen)
+                        if (not self.isVisible() and not getattr(self, "_is_shutting_down", False))
+                        else None
+                    ))
+                else:
+                    page.setLifecycleState(page.LifecycleState.Active)
+        except Exception:
+            pass
+
     def _restore_from_tray(self) -> None:
+        self._set_webengine_eco(False)
         self.showNormal()
         self.raise_()
         self.activateWindow()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._set_webengine_eco(False)
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        if not getattr(self, "_is_shutting_down", False):
+            self._set_webengine_eco(True)
 
     def _perform_shutdown_and_exit(self, ask_confirm: bool = True) -> bool:
         import os

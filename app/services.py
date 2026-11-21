@@ -276,30 +276,39 @@ class ResourceMonitorWorker(QThread):
         self._output_dir_fn = output_dir_fn
         self._game_cfg_fn = game_cfg_fn
         self._running = True
+        self._eco_mode = False
         self._has_nvidia_smi = shutil.which("nvidia-smi") is not None
+
+    def set_eco_mode(self, enabled: bool) -> None:
+        self._eco_mode = bool(enabled)
 
     def stop(self) -> None:
         self._running = False
 
     def run(self) -> None:
         psutil.cpu_percent(interval=None)
+        tick = 0
+        cached_game = ""
+        cached_gpu = (None, 0, 0, 0)
         while self._running:
-            active_game = ""
-            if self._game_cfg_fn:
+            tick += 1
+            eco = self._eco_mode
+            # Poll running game every 3rd tick in foreground or every tick (20s) in eco mode
+            if self._game_cfg_fn and (eco or tick % 3 == 1):
                 try:
                     gm_on, gm_procs = self._game_cfg_fn()
-                    if gm_on:
-                        active_game = detect_running_game(gm_procs)
+                    cached_game = detect_running_game(gm_procs) if gm_on else ""
                 except Exception:
-                    pass
+                    cached_game = ""
 
             snap = ResourceSnapshot(
                 cpu_pct=psutil.cpu_percent(interval=None),
                 ram_pct=psutil.virtual_memory().percent,
                 disk_free_gb=get_disk_free_gb(self._output_dir_fn()),
-                active_game=active_game,
+                active_game=cached_game,
             )
-            if self._has_nvidia_smi:
+            # Never spawn nvidia-smi when minimized to tray (eco mode); in foreground poll every 2nd tick (~8s)
+            if self._has_nvidia_smi and not eco and tick % 2 == 1:
                 try:
                     res = subprocess.run(
                         [
@@ -309,21 +318,28 @@ class ResourceMonitorWorker(QThread):
                         ],
                         capture_output=True,
                         text=True,
-                        timeout=3,
+                        timeout=2,
                         creationflags=CREATE_NO_WINDOW,
                     )
                     if res.returncode == 0 and res.stdout.strip():
                         parts = [p.strip() for p in res.stdout.strip().splitlines()[0].split(",")]
                         if len(parts) >= 4:
-                            snap.gpu_pct = int(parts[0])
-                            snap.nvenc_pct = int(parts[1]) if parts[1].isdigit() else 0
-                            snap.vram_used_mb = int(parts[2])
-                            snap.vram_total_mb = int(parts[3])
+                            cached_gpu = (
+                                int(parts[0]),
+                                int(parts[1]) if parts[1].isdigit() else 0,
+                                int(parts[2]),
+                                int(parts[3]),
+                            )
                 except Exception:
                     pass
+            if not eco and cached_gpu[0] is not None:
+                snap.gpu_pct, snap.nvenc_pct, snap.vram_used_mb, snap.vram_total_mb = cached_gpu
             self.stats_ready.emit(snap)
-            for _ in range(30):
-                if not self._running:
+
+            # 4s in active window, 20s in tray/background (wake immediately if eco mode turns off)
+            steps = 200 if eco else 40
+            for _ in range(steps):
+                if not self._running or (eco and not self._eco_mode):
                     break
                 time.sleep(0.1)
 

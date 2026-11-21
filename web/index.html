@@ -48,7 +48,7 @@
       </button>
 
       <nav class="nav-scroll">
-        <div class="nav-group-label">ЗАПИСЬ</div>
+        <div class="nav-group-label">ЭФИРЫ</div>
         <button class="nav-item active" data-page="live">
           <span class="nav-ico"><i data-icon="radio"></i></span>
           <span class="nav-label">Прямые эфиры</span>
@@ -56,16 +56,27 @@
         </button>
         <button class="nav-item" data-page="multiview">
           <span class="nav-ico"><i data-icon="video"></i></span>
-          <span class="nav-label">Мультистрим</span>
+          <span class="nav-label">Мультистрим 2×2</span>
         </button>
         <button class="nav-item" data-page="vod">
           <span class="nav-ico"><i data-icon="film"></i></span>
           <span class="nav-label">VOD и Клипы</span>
           <span class="nav-badge hidden" id="badgeVod">0</span>
         </button>
+
+        <div class="nav-group-label">КОНТЕНТ</div>
         <button class="nav-item" data-page="library">
           <span class="nav-ico"><i data-icon="grid"></i></span>
           <span class="nav-label">Библиотека</span>
+        </button>
+        <button class="nav-item" data-page="studio">
+          <span class="nav-ico"><i data-icon="scissors"></i></span>
+          <span class="nav-label">Видеоредактор</span>
+          <span class="nav-badge hidden" id="badgeStudio">0</span>
+        </button>
+        <button class="nav-item" data-page="publish">
+          <span class="nav-ico"><i data-icon="upload"></i></span>
+          <span class="nav-label">Автопостинг</span>
         </button>
 
         <div class="nav-group-label">ОБРАБОТКА</div>
@@ -74,28 +85,9 @@
           <span class="nav-label">Блюр и Очередь</span>
           <span class="nav-badge hidden" id="badgeBlur">0</span>
         </button>
-        <button class="nav-item" data-page="studio">
-          <span class="nav-ico"><i data-icon="scissors"></i></span>
-          <span class="nav-label">Монтаж и AI</span>
-          <span class="nav-badge hidden" id="badgeStudio">0</span>
-        </button>
-        <button class="nav-item" data-page="publish">
-          <span class="nav-ico"><i data-icon="upload"></i></span>
-          <span class="nav-label">Автопостинг</span>
-        </button>
-
-        <div class="nav-group-label">СИСТЕМА</div>
         <button class="nav-item" data-page="analytics">
           <span class="nav-ico"><i data-icon="flame"></i></span>
           <span class="nav-label">Аналитика</span>
-        </button>
-        <button class="nav-item" data-page="settings">
-          <span class="nav-ico"><i data-icon="sliders"></i></span>
-          <span class="nav-label">Настройки</span>
-        </button>
-        <button class="nav-item" data-page="logs">
-          <span class="nav-ico"><i data-icon="terminal"></i></span>
-          <span class="nav-label">Журнал</span>
         </button>
       </nav>
 
@@ -103,7 +95,7 @@
       <div class="update-banner hidden" id="updateBanner">
         <div class="upd-head">
           <span class="upd-badge" id="updBadge">ОБНОВЛЕНИЕ</span>
-          <span class="upd-ver" id="updVer">v2.1.0</span>
+          <span class="upd-ver" id="updVer">v5.0.0</span>
         </div>
         <div class="upd-text" id="updText">Доступна новая версия</div>
         <div class="prog-track hidden" id="updProgWrap"><div class="prog-fill" id="updProgBar" style="width:0%"></div></div>
@@ -112,22 +104,22 @@
         </div>
       </div>
 
-      <!-- Live Telemetry & Resources Card -->
+      <!-- Compact System Status & Utility Footer -->
       <div class="telemetry-card">
         <div class="tel-header">
           <span class="tel-dot online"></span>
-          <span class="tel-gpu-label" id="telGpuLabel">GPU NVENC готов</span>
+          <span class="tel-gpu-label" id="telGpuLabel">GPU готов</span>
         </div>
         <div class="sparkline-wrap">
-          <svg id="sparklineSvg" viewBox="0 0 200 34" preserveAspectRatio="none">
+          <svg id="sparklineSvg" viewBox="0 0 200 26" preserveAspectRatio="none">
             <defs>
               <linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stop-color="#8B5CF6" stop-opacity="0.38"/>
+                <stop offset="0%" stop-color="#8B5CF6" stop-opacity="0.30"/>
                 <stop offset="100%" stop-color="#8B5CF6" stop-opacity="0.0"/>
               </linearGradient>
             </defs>
             <path id="sparkArea" fill="url(#sparkFill)" d=""/>
-            <path id="sparkLine" fill="none" stroke="#A78BFA" stroke-width="1.8" d=""/>
+            <path id="sparkLine" fill="none" stroke="#A78BFA" stroke-width="1.6" d=""/>
           </svg>
         </div>
         <div class="tel-metrics">
@@ -138,9 +130,17 @@
           <span id="telDisk">Диск: —</span>
         </div>
         <div class="disk-bar"><div class="disk-bar-fill" id="telDiskBar" style="width: 30%"></div></div>
-        <button class="btn btn-subtle btn-full" id="btnOpenFolder">
-          <i data-icon="folder"></i><span>Папка записей</span>
-        </button>
+        <div class="sidebar-util-row">
+          <button class="nav-item util-btn" data-page="settings" title="Настройки приложения">
+            <i data-icon="sliders"></i><span>Настройки</span>
+          </button>
+          <button class="nav-item util-btn" data-page="logs" title="Журнал событий">
+            <i data-icon="terminal"></i><span>Логи</span>
+          </button>
+          <button class="util-btn" id="btnOpenFolder" title="Открыть папку записей">
+            <i data-icon="folder"></i>
+          </button>
+        </div>
       </div>
     </aside>
 
