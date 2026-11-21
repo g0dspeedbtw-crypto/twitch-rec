@@ -4261,7 +4261,20 @@
     } else if (type === "ai_suite_result") {
       const t = data?.task;
       const d = data?.data || {};
-      if (t === "viral_clips") { state.aiViralClips = d.clips || []; if (state.page === "studio") renderStudioInspector(); }
+      if (t === "viral_clips") {
+        const clips = d.clips || [];
+        state.aiViralClips = clips;
+        state.highlights = {
+          mode: "events",
+          heatmap: state.highlights.heatmap || [],
+          highlights: clips.map((c) => ({
+            timestamp_sec: Number(c.timestamp_sec || c.start_sec || 0),
+            reason: `⚡ ${c.score || 75}/100 · ${c.title || c.reason || "Вирусный момент"}`,
+            label: c.title || "",
+          })),
+        };
+        if (state.page === "studio") { renderStudioInspector(); renderStudioTimelineUI(); }
+      }
       else if (t === "face_track" && d.ok && d.region) { state.shortsCam = d.region; if (state.page === "studio") renderStudioInspector(); }
       else if (t === "speech_search") { state.speechSearchHits = d.hits || []; if (state.page === "library") renderLibrarySpeechHits(); }
       else if (t === "privacy_blur" && d.ok && Array.isArray(d.regions)) {

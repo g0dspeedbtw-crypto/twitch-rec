@@ -1991,8 +1991,12 @@ class AppBridge(QObject):
                 bridge._toast("AI Ban-Word Shield", d.get("message") or "", "success" if d.get("ok") else "error")
             elif t_type == "viral_clips":
                 bridge._toast("AI Вирусные клипы", f"Найдено {len(d.get('clips') or [])} лучших моментов", "success")
+            elif t_type == "chapters":
+                bridge._toast("AI Главы YouTube", "Таймкоды и главы готовы!", "success")
             elif t_type == "game_events":
                 bridge._toast("AI Vision (Игровые события)", f"Найдено {len(d.get('events') or [])} событий", "success")
+            elif d.get("ok") is False and d.get("error"):
+                bridge._toast("AI Инструмент", str(d.get("error"))[:180], "error")
             bridge._emit("ai_suite_result", {"task": t_type, "data": d})
 
         w.done.connect(_on_done)
@@ -2025,6 +2029,18 @@ class AppBridge(QObject):
                     self.done.emit(False, "Ollama не установлен. Скачайте бесплатно с ollama.com")
                     return
                 try:
+                    # Ensure Ollama daemon is running before pulling model (critical on macOS)
+                    import time as _t
+                    from app.ai_suite import detect_local_llm_status
+                    if not detect_local_llm_status().get("ollama_running"):
+                        if sys.platform == "darwin" and os.path.exists("/Applications/Ollama.app"):
+                            subprocess.Popen(["open", "-g", "-a", "Ollama"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        else:
+                            subprocess.Popen([ollama, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
+                        for _ in range(10):
+                            _t.sleep(0.6)
+                            if detect_local_llm_status().get("ollama_running"):
+                                break
                     res = subprocess.run([ollama, "pull", m], capture_output=True, text=True, timeout=1800, creationflags=CREATE_NO_WINDOW)
                     if res.returncode == 0:
                         self.done.emit(True, f"Локальная модель {m} установлена и готова к работе без API!")

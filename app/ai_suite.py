@@ -51,8 +51,9 @@ def detect_local_llm_status() -> dict:
         "active_model": "",
         "engine_label": "Встроенный оффлайн AI (без API)",
     }
+    no_proxy = {"http": None, "https": None}
     try:
-        r = requests.get("http://127.0.0.1:11434/api/tags", timeout=1.5)
+        r = requests.get("http://127.0.0.1:11434/api/tags", timeout=1.5, proxies=no_proxy)
         if r.status_code == 200:
             models = [m.get("name", "") for m in (r.json().get("models") or []) if m.get("name")]
             status["ollama_running"] = True
@@ -65,7 +66,7 @@ def detect_local_llm_status() -> dict:
     except Exception:
         pass
     try:
-        r2 = requests.get("http://127.0.0.1:1234/v1/models", timeout=1.2)
+        r2 = requests.get("http://127.0.0.1:1234/v1/models", timeout=1.2, proxies=no_proxy)
         if r2.status_code == 200:
             models = [m.get("id", "") for m in (r2.json().get("data") or []) if m.get("id")]
             status["lmstudio_running"] = True
@@ -129,7 +130,8 @@ def _call_llm_text(
         ],
         "temperature": 0.7,
     }
-    proxies = {"http": cfg.proxy_url, "https": cfg.proxy_url} if getattr(cfg, "proxy_url", "") else None
+    is_local = endpoint.startswith(("http://127.0.0.1", "http://localhost"))
+    proxies = {"http": None, "https": None} if is_local else ({"http": cfg.proxy_url, "https": cfg.proxy_url} if getattr(cfg, "proxy_url", "") else None)
     try:
         r = requests.post(endpoint, headers=headers, json=payload, timeout=timeout, proxies=proxies)
         if r.status_code == 200:
@@ -231,6 +233,15 @@ def find_viral_clips(
                 candidates.append((float(h.timestamp_sec), max(62.0, 82.0 - idx * 3.0), h.reason))
         except Exception:
             pass
+
+    # 5. Guaranteed fallback scenes so AI Viral Clips never returns empty on quiet/short videos
+    if not candidates:
+        dur = float(probe_video(video_path).get("duration") or 0.0)
+        if dur > 8.0:
+            n_fb = min(max_clips, max(1, int(dur // 25) or 1))
+            for i in range(n_fb):
+                ts = max(3.0, (dur * (i + 0.5)) / n_fb)
+                candidates.append((ts, 66.0 - i * 2.0, f"Ключевой момент #{i + 1}"))
 
     # Cluster candidates within 25s window and boost multi-signal overlaps!
     candidates.sort(key=lambda x: x[0])
