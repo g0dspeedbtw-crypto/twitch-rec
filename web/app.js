@@ -1965,11 +1965,88 @@
     `;
   }
 
+  // ==================== YOUTUBE ACCOUNT OAUTH WIDGET ====================
+  function renderYouTubeAccountBoxHtml(prefix = "yt") {
+    const ya = state.ytAccount || { connected: false, has_secrets: false, secrets_path: state.config.youtube_client_secrets || "", channel_title: "", channel_handle: "", avatar_url: "" };
+    const sp = ya.secrets_path || state.config.youtube_client_secrets || "";
+    if (ya.connected) {
+      return `
+        <div class="local-ai-banner" style="background:linear-gradient(135deg,rgba(239,68,68,0.12),rgba(139,92,246,0.10));border-color:rgba(239,68,68,0.32);margin-bottom:14px;">
+          <div class="input-row" style="gap:12px;">
+            ${ya.avatar_url ? `<img src="${esc(ya.avatar_url)}" style="width:36px;height:36px;border-radius:50%;border:2px solid #ef4444;" />` : `<div style="width:36px;height:36px;border-radius:50%;background:#ef4444;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;">▶</div>`}
+            <div>
+              <div style="font-size:13px;font-weight:700;color:#4ade80;">✅ YouTube подключён: ${esc(ya.channel_title || "Канал")} ${ya.channel_handle ? `<span style="color:var(--text-muted);font-weight:500;">(${esc(ya.channel_handle)})</span>` : ""}</div>
+              <div style="font-size:12px;color:var(--text-secondary);">Автопилот и Автопостинг загружают видео и обложки на этот канал автоматически</div>
+            </div>
+          </div>
+          <div class="input-row" style="gap:6px;">
+            <button type="button" class="btn btn-subtle btn-sm" id="${prefix}BtnLogin">Сменить аккаунт</button>
+            <button type="button" class="btn btn-danger-ghost btn-sm" id="${prefix}BtnLogout">Выйти</button>
+          </div>
+        </div>
+      `;
+    }
+    return `
+      <div class="card" style="margin-bottom:14px;border-color:rgba(239,68,68,0.28);background:linear-gradient(135deg,rgba(239,68,68,0.07),rgba(15,17,26,0.6));">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+          <div>
+            <div style="font-size:13.5px;font-weight:700;">▶️ Вход в аккаунт YouTube (для автопилота и автозагрузки)</div>
+            <div style="font-size:12px;color:var(--text-secondary);">Выберите <code>client_secrets.json</code> и нажмите «Войти через Google» — браузер откроется 1 раз, дальше всё работает само</div>
+          </div>
+          <button type="button" class="btn btn-primary btn-sm" id="${prefix}BtnLogin" style="background:#ef4444;border-color:#ef4444;">▶ Войти через Google / YouTube</button>
+        </div>
+        <div class="input-row" style="gap:8px;margin-bottom:8px;">
+          <input class="input" id="${prefix}SecretsInp" value="${esc(sp)}" placeholder="Путь к client_secrets.json (OAuth Desktop JSON)..." />
+          <button type="button" class="btn btn-subtle btn-sm" id="${prefix}BtnPickJson">${iconSvg("folder", 14)}<span>Выбрать JSON</span></button>
+        </div>
+        <details class="adv-group" style="margin-top:4px;">
+          <summary style="font-size:12px;">Как получить client_secrets.json бесплатно за 2 минуты?</summary>
+          <div class="adv-body" style="padding-top:8px;font-size:12px;color:var(--text-secondary);line-height:1.55;">
+            1. Откройте <a href="#" id="${prefix}LinkGcp" style="color:var(--accent-light);text-decoration:underline;">Google Cloud Console → API & Services</a> и создайте проект.<br/>
+            2. Включите <strong>YouTube Data API v3</strong> в разделе <em>Library</em>.<br/>
+            3. В <em>OAuth consent screen</em> добавьте свой Google email в <strong>Test users</strong>.<br/>
+            4. В <em>Credentials → Create Credentials → OAuth client ID → Desktop app</em> скачайте JSON и выберите его выше.
+          </div>
+        </details>
+      </div>
+    `;
+  }
+
+  function bindYouTubeAccountBoxEvents(prefix = "yt") {
+    $(`#${prefix}BtnPickJson`)?.addEventListener("click", async () => {
+      const f = await callBackend("pickFile", "Google OAuth JSON (*.json)");
+      if (f) {
+        const inp = $(`#${prefix}SecretsInp`);
+        if (inp) inp.value = f;
+        const cfgInp = $("#cfgYtSecrets");
+        if (cfgInp) cfgInp.value = f;
+        state.config.youtube_client_secrets = f;
+        if (state.settingsDraft) state.settingsDraft.youtube_client_secrets = f;
+      }
+    });
+    $(`#${prefix}BtnLogin`)?.addEventListener("click", () => {
+      const sp = $(`#${prefix}SecretsInp`)?.value.trim() || state.config.youtube_client_secrets || "";
+      callBackend("youtubeLogin", sp);
+    });
+    $(`#${prefix}BtnLogout`)?.addEventListener("click", () => {
+      callBackend("youtubeLogout");
+    });
+    $(`#${prefix}LinkGcp`)?.addEventListener("click", (e) => {
+      e.preventDefault();
+      callBackend("openExternalUrl", "https://console.cloud.google.com/apis/credentials");
+    });
+  }
+
   // ==================== PAGE 5b: SOCIAL AUTO-POSTING & LOCAL AI ====================
   function renderPublishPage() {
     const root = $("#page-publish");
     const pub = state.pub;
     if (!pub.videoPath && state.studioFile) pub.videoPath = state.studioFile;
+    if (!state.ytAccount) {
+      callBackend("getYouTubeAccountStatus").then((raw) => {
+        try { state.ytAccount = JSON.parse(raw || "{}"); if (state.page === "publish") renderPublishPage(); } catch {}
+      });
+    }
     if (!state.localAi) {
       callBackend("getLocalAiStatus").then((raw) => {
         try {
@@ -1992,6 +2069,8 @@
           <button class="btn btn-primary" id="btnPubRunNow">${iconSvg("upload", 15)}<span>Опубликовать (${pub.platforms.length})</span></button>
         </div>
       </div>
+
+      ${renderYouTubeAccountBoxHtml("pubYt")}
 
       <div class="local-ai-banner">
         <div>
@@ -2195,6 +2274,7 @@
 
     $("#btnPubPullOllama")?.addEventListener("click", () => callBackend("pullOllamaModel", state.config.local_ai_model || "qwen2.5:3b"));
     $("#btnPubGetOllama")?.addEventListener("click", () => callBackend("openExternalUrl", "https://ollama.com/download"));
+    bindYouTubeAccountBoxEvents("pubYt");
     $("#btnPubPickVid").onclick = async () => {
       const p = await callBackend("pickFile", "Видео (*.mp4 *.mkv *.ts *.mov *.webm)");
       if (p) { pub.videoPath = p; renderPublishPage(); }
@@ -2644,7 +2724,8 @@
             <input class="input" id="cfgBrandVoice" value="${esc(c.ai_brand_voice || "")}" placeholder="Дерзкий молодёжный стиль, короткие кликбейтные заголовки, эмодзи 🔥💀, аудитория CS2/GTA..." />
           </div>
           <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:6px;">
-            <div class="setting-row-title" style="margin-bottom:6px;">Ключи автопостинга YouTube и VK (опционально)</div>
+            ${renderYouTubeAccountBoxHtml("setYt")}
+            <div class="setting-row-title" style="margin-bottom:6px;">Ключи автопостинга VK (опционально)</div>
             <div class="form-grid-3">
               <div class="field"><label>YouTube client_secrets.json</label><input class="input" id="cfgYtSecrets" value="${esc(c.youtube_client_secrets || "")}" placeholder="Путь к OAuth JSON..." /></div>
               <div class="field"><label>VK Access Token</label><input type="password" class="input" id="cfgVkTok" value="${esc(c.vk_access_token || "")}" placeholder="vk1.a...." /></div>
@@ -2998,6 +3079,12 @@
       await callBackend("sendTestNotification");
     };
     bindSettingsUpdateEvents(collectSettings);
+    bindYouTubeAccountBoxEvents("setYt");
+    if (!state.ytAccount) {
+      callBackend("getYouTubeAccountStatus").then((raw) => {
+        try { state.ytAccount = JSON.parse(raw || "{}"); if (state.page === "settings") renderSettingsPage(); } catch {}
+      });
+    }
   }
 
   function renderSettingsUpdateBoxHtml() {
@@ -4148,6 +4235,10 @@
     } else if (type === "publish_result") {
       state.pub.results = data?.results || [];
       if (state.page === "publish") renderPublishPage();
+    } else if (type === "yt_account") {
+      state.ytAccount = data || null;
+      if (state.page === "publish") renderPublishPage();
+      else if (state.page === "settings") renderSettingsPage();
     } else if (type === "scheduled_posts") {
       state.scheduledPosts = data || [];
       if (state.page === "publish") renderPublishPage();

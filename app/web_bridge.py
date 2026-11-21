@@ -2625,6 +2625,54 @@ class AppBridge(QObject):
         self._aux_workers.append(dw)
         dw.start()
 
+    @Slot(result=str)
+    def getYouTubeAccountStatus(self) -> str:
+        from app.publisher import get_youtube_account_status
+        return json.dumps(get_youtube_account_status(self.config), ensure_ascii=False)
+
+    @Slot(str)
+    def youtubeLogin(self, secrets_path: str = "") -> None:
+        sp = (secrets_path or "").strip()
+        if sp:
+            self.config.youtube_client_secrets = sp
+            self.config.save()
+        if not (self.config.youtube_client_secrets or "").strip() or not os.path.exists(self.config.youtube_client_secrets):
+            self._toast("Вход в YouTube", "Сначала выберите файл client_secrets.json (кнопка «Выбрать JSON»)", "error")
+            return
+        self._toast("Вход в YouTube", "Открываем браузер для входа в ваш Google-аккаунт...", "info")
+        cfg_copy = deepcopy(self.config)
+        bridge = self
+
+        class _YtAuthWorker(QThread):
+            done = Signal(bool, str, dict)
+
+            def run(self) -> None:
+                from app.publisher import youtube_oauth_login
+                ok, msg, st = youtube_oauth_login(cfg_copy)
+                self.done.emit(ok, msg, st)
+
+        aw = _YtAuthWorker(self)
+
+        def _finish(ok: bool, msg: str, st: dict) -> None:
+            bridge._log(f"[YouTube OAuth] {msg}")
+            bridge._toast("YouTube Аккаунт", msg, "success" if ok else "error")
+            bridge._emit("yt_account", st if st else json.loads(bridge.getYouTubeAccountStatus()))
+            if aw in bridge._aux_workers:
+                bridge._aux_workers.remove(aw)
+
+        aw.done.connect(_finish)
+        self._aux_workers.append(aw)
+        aw.start()
+
+    @Slot(result=str)
+    def youtubeLogout(self) -> str:
+        from app.publisher import get_youtube_account_status, youtube_oauth_logout
+        youtube_oauth_logout()
+        st = get_youtube_account_status(self.config)
+        self._emit("yt_account", st)
+        self._toast("YouTube Аккаунт", "Вы вышли из аккаунта YouTube", "info")
+        return json.dumps(st, ensure_ascii=False)
+
     def _check_scheduled_posts(self) -> None:
         from app.broadcast_suite import load_scheduled_posts, save_scheduled_posts
         posts = load_scheduled_posts()

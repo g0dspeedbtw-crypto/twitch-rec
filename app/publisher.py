@@ -185,6 +185,265 @@ def publish_to_vk(
     return True, "VK: открыт VK Видео / Клипы и выделен файл (текст скопирован — вставьте Ctrl+V)"
 
 
+YOUTUBE_TOKEN_PATH = DATA_DIR / "youtube_token.json"
+YOUTUBE_SCOPES = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly"
+
+
+def _load_youtube_client_creds(secrets_path: str) -> Tuple[Optional[dict], str]:
+    p = (secrets_path or "").strip()
+    if not p or not os.path.exists(p):
+        return None, "Файл client_secrets.json не выбран или не найден"
+    try:
+        raw = json.loads(Path(p).read_text(encoding="utf-8"))
+        section = raw.get("installed") or raw.get("web") or raw
+        cid = (section.get("client_id") or "").strip()
+        csec = (section.get("client_secret") or "").strip()
+        if not cid or not csec:
+            return None, "В файле не найдены client_id / client_secret (скачайте OAuth Desktop JSON из Google Cloud Console)"
+        return {
+            "client_id": cid,
+            "client_secret": csec,
+            "auth_uri": section.get("auth_uri") or "https://accounts.google.com/o/oauth2/v2/auth",
+            "token_uri": section.get("token_uri") or "https://oauth2.googleapis.com/token",
+        }, ""
+    except Exception as exc:
+        return None, f"Ошибка чтения JSON: {exc}"
+
+
+def _read_youtube_token() -> Optional[dict]:
+    if not YOUTUBE_TOKEN_PATH.exists():
+        return None
+    try:
+        return json.loads(YOUTUBE_TOKEN_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _save_youtube_token(data: dict) -> None:
+    try:
+        YOUTUBE_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        YOUTUBE_TOKEN_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _fetch_youtube_channel_info(access_token: str, proxies: Optional[dict] = None) -> dict:
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/youtube/v3/channels",
+            params={"part": "snippet", "mine": "true"},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=15,
+            proxies=proxies,
+        )
+        if r.status_code == 200:
+            items = (r.json() or {}).get("items") or []
+            if items:
+                sn = items[0].get("snippet") or {}
+                thumbs = sn.get("thumbnails") or {}
+                av = (thumbs.get("default") or thumbs.get("medium") or {}).get("url", "")
+                return {
+                    "channel_id": items[0].get("id", ""),
+                    "channel_title": sn.get("title", "YouTube Канал"),
+                    "channel_handle": sn.get("customUrl", ""),
+                    "avatar_url": av,
+                }
+    except Exception:
+        pass
+    return {}
+
+
+def _get_valid_youtube_access_token(cfg: AppConfig) -> Tuple[Optional[str], str]:
+    import time as _t
+    tok = _read_youtube_token()
+    if not tok:
+        return None, "Аккаунт YouTube не подключён — нажмите «Войти в YouTube»"
+    proxies = {"http": cfg.proxy_url, "https": cfg.proxy_url} if cfg.proxy_url else None
+    now = _t.time()
+    if tok.get("access_token") and float(tok.get("expires_at") or 0) > now + 90:
+        return str(tok["access_token"]), ""
+
+    refresh = tok.get("refresh_token")
+    cid = tok.get("client_id")
+    csec = tok.get("client_secret")
+    token_uri = tok.get("token_uri") or "https://oauth2.googleapis.com/token"
+    if (not cid or not csec) and getattr(cfg, "youtube_client_secrets", ""):
+        loaded, _ = _load_youtube_client_creds(cfg.youtube_client_secrets)
+        if loaded:
+            cid, csec, token_uri = loaded["client_id"], loaded["client_secret"], loaded["token_uri"]
+
+    if not refresh or not cid or not csec:
+        return None, "Сессия YouTube истекла — войдите заново через кнопку «Войти в YouTube»"
+
+    try:
+        r = requests.post(
+            token_uri,
+            data={
+                "client_id": cid,
+                "client_secret": csec,
+                "refresh_token": refresh,
+                "grant_type": "refresh_token",
+            },
+            timeout=20,
+            proxies=proxies,
+        )
+        if r.status_code == 200:
+            new_d = r.json()
+            tok["access_token"] = new_d.get("access_token", "")
+            tok["expires_at"] = now + float(new_d.get("expires_in", 3500))
+            _save_youtube_token(tok)
+            return str(tok["access_token"]), ""
+        return None, f"Не удалось обновить токен YouTube ({r.status_code}): войдите заново"
+    except Exception as exc:
+        return None, f"Ошибка обновления токена YouTube: {exc}"
+
+
+def get_youtube_account_status(cfg: AppConfig) -> dict:
+    secrets_path = (getattr(cfg, "youtube_client_secrets", "") or "").strip()
+    has_secrets = bool(secrets_path and os.path.exists(secrets_path))
+    tok = _read_youtube_token()
+    if not tok or not (tok.get("refresh_token") or tok.get("access_token")):
+        return {
+            "connected": False,
+            "has_secrets": has_secrets,
+            "secrets_path": secrets_path,
+            "channel_title": "",
+            "channel_handle": "",
+            "avatar_url": "",
+        }
+    return {
+        "connected": True,
+        "has_secrets": has_secrets,
+        "secrets_path": secrets_path,
+        "channel_title": tok.get("channel_title") or "YouTube Канал",
+        "channel_handle": tok.get("channel_handle") or "",
+        "avatar_url": tok.get("avatar_url") or "",
+    }
+
+
+def youtube_oauth_logout() -> bool:
+    try:
+        if YOUTUBE_TOKEN_PATH.exists():
+            YOUTUBE_TOKEN_PATH.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def youtube_oauth_login(cfg: AppConfig, timeout_sec: int = 180) -> Tuple[bool, str, dict]:
+    """
+    Pure-Python interactive Google OAuth2 Desktop login (zero extra libraries required).
+    Opens the user's browser, listens on a random localhost callback port, saves refresh_token + channel info.
+    """
+    import time as _t
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import parse_qs, urlencode, urlparse
+
+    creds_info, err = _load_youtube_client_creds(getattr(cfg, "youtube_client_secrets", ""))
+    if not creds_info:
+        return False, err, {}
+
+    result_box: Dict[str, str] = {"code": "", "error": ""}
+
+    class _OAuthCallback(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args) -> None:
+            return
+
+        def do_GET(self) -> None:
+            qs = parse_qs(urlparse(self.path).query)
+            if "code" in qs:
+                result_box["code"] = qs["code"][0]
+                html = (
+                    "<!doctype html><html><head><meta charset='utf-8'><title>YouTube подключён</title>"
+                    "<style>body{background:#0f111a;color:#eef2ff;font-family:system-ui,sans-serif;display:flex;"
+                    "align-items:center;justify-content:center;height:100vh;margin:0;}"
+                    ".box{background:#181b2a;border:1px solid #2e3452;border-radius:16px;padding:32px 40px;text-align:center;}"
+                    "h1{color:#4ade80;margin:0 0 10px;}p{color:#94a3b8;margin:0;}</style></head>"
+                    "<body><div class='box'><h1>✅ Аккаунт YouTube подключён!</h1>"
+                    "<p>Можете закрыть эту вкладку и вернуться в Twitch Recorder Pro.</p></div></body></html>"
+                )
+            else:
+                result_box["error"] = qs.get("error", ["Отменено пользователем"])[0]
+                html = (
+                    "<!doctype html><html><head><meta charset='utf-8'><title>Ошибка входа</title></head>"
+                    f"<body style='background:#0f111a;color:#f87171;font-family:system-ui;padding:40px;'>"
+                    f"<h2>Ошибка авторизации: {result_box['error']}</h2></body></html>"
+                )
+            body = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = HTTPServer(("127.0.0.1", 0), _OAuthCallback)
+    port = server.server_address[1]
+    redirect_uri = f"http://127.0.0.1:{port}"
+    server.timeout = 1.0
+
+    params = urlencode({
+        "client_id": creds_info["client_id"],
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": YOUTUBE_SCOPES,
+        "access_type": "offline",
+        "prompt": "consent select_account",
+    })
+    auth_url = f"{creds_info['auth_uri']}?{params}"
+    _open_url(auth_url)
+
+    deadline = _t.time() + max(30, timeout_sec)
+    try:
+        while _t.time() < deadline and not result_box["code"] and not result_box["error"]:
+            server.handle_request()
+    finally:
+        try:
+            server.server_close()
+        except Exception:
+            pass
+
+    if result_box["error"]:
+        return False, f"Вход отменён: {result_box['error']}", {}
+    if not result_box["code"]:
+        return False, "Время ожидания входа в браузере истекло (3 мин)", {}
+
+    proxies = {"http": cfg.proxy_url, "https": cfg.proxy_url} if cfg.proxy_url else None
+    try:
+        r = requests.post(
+            creds_info["token_uri"],
+            data={
+                "code": result_box["code"],
+                "client_id": creds_info["client_id"],
+                "client_secret": creds_info["client_secret"],
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            },
+            timeout=25,
+            proxies=proxies,
+        )
+        if r.status_code != 200:
+            return False, f"Ошибка Google OAuth ({r.status_code}): {r.text[:200]}", {}
+        td = r.json()
+        access_tok = td.get("access_token", "")
+        if not access_tok:
+            return False, "Google не вернул access_token", {}
+        ch_info = _fetch_youtube_channel_info(access_tok, proxies=proxies)
+        tok_payload = {
+            "access_token": access_tok,
+            "refresh_token": td.get("refresh_token", ""),
+            "expires_at": _t.time() + float(td.get("expires_in", 3500)),
+            "client_id": creds_info["client_id"],
+            "client_secret": creds_info["client_secret"],
+            "token_uri": creds_info["token_uri"],
+            **ch_info,
+        }
+        _save_youtube_token(tok_payload)
+        ch_name = ch_info.get("channel_title") or "YouTube Канал"
+        return True, f"Аккаунт YouTube подключён: {ch_name}", get_youtube_account_status(cfg)
+    except Exception as exc:
+        return False, f"Ошибка обмена токена: {exc}", {}
+
+
 def publish_to_youtube(
     cfg: AppConfig,
     video_path: str,
@@ -194,53 +453,90 @@ def publish_to_youtube(
     hashtags: str,
     privacy: str = "unlisted",
 ) -> Tuple[bool, str]:
-    """Upload directly via YouTube Data API v3 if client_secrets.json + token exist, else open YouTube Studio."""
-    secrets_path = (getattr(cfg, "youtube_client_secrets", "") or "").strip()
+    """Upload directly via pure-Python YouTube Data API v3 Resumable Upload (zero extra packages)."""
     full_desc = f"{description}\n\n{hashtags}".strip()
+    proxies = {"http": cfg.proxy_url, "https": cfg.proxy_url} if cfg.proxy_url else None
 
-    if secrets_path and os.path.exists(secrets_path) and video_path and os.path.exists(video_path):
+    access_token, err = _get_valid_youtube_access_token(cfg)
+    if access_token and video_path and os.path.exists(video_path):
         try:
-            from google.oauth2.credentials import Credentials
-            from google_auth_oauthlib.flow import InstalledAppFlow
-            from googleapiclient.discovery import build
-            from googleapiclient.http import MediaFileUpload
-
-            scopes = ["https://www.googleapis.com/auth/youtube.upload"]
-            tok_file = DATA_DIR / "youtube_token.json"
-            creds = None
-            if tok_file.exists():
-                creds = Credentials.from_authorized_user_file(str(tok_file), scopes)
-            if not creds or not creds.valid:
-                flow = InstalledAppFlow.from_client_secrets_file(secrets_path, scopes)
-                creds = flow.run_local_server(port=0)
-                tok_file.write_text(creds.to_json(), encoding="utf-8")
-
-            yt = build("youtube", "v3", credentials=creds)
             tags = [t.lstrip("#").strip() for t in hashtags.replace(",", " ").split() if t.strip()][:25]
-            body = {
+            file_size = os.path.getsize(video_path)
+            meta = {
                 "snippet": {"title": title[:100], "description": full_desc[:4900], "tags": tags, "categoryId": "20"},
                 "status": {"privacyStatus": privacy or "unlisted"},
             }
-            media = MediaFileUpload(video_path, chunksize=8 * 1024 * 1024, resumable=True)
-            req = yt.videos().insert(part="snippet,status", body=body, media_body=media)
-            resp = None
-            while resp is None:
-                _, resp = req.next_chunk()
-            vid_id = resp.get("id", "")
-            if vid_id and thumb_path and os.path.exists(thumb_path):
+            init_r = requests.post(
+                "https://www.googleapis.com/upload/youtube/v3/videos",
+                params={"uploadType": "resumable", "part": "snippet,status"},
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json; charset=UTF-8",
+                    "X-Upload-Content-Length": str(file_size),
+                    "X-Upload-Content-Type": "video/*",
+                },
+                data=json.dumps(meta, ensure_ascii=False).encode("utf-8"),
+                timeout=30,
+                proxies=proxies,
+            )
+            if init_r.status_code not in (200, 201):
+                return False, f"YouTube API init ошибка ({init_r.status_code}): {init_r.text[:200]}"
+            upload_url = init_r.headers.get("Location")
+            if not upload_url:
+                return False, "YouTube API не вернул URL загрузки"
+
+            chunk_size = 8 * 1024 * 1024
+            vid_id = ""
+            with open(video_path, "rb") as vf:
+                offset = 0
+                while offset < file_size:
+                    chunk = vf.read(chunk_size)
+                    if not chunk:
+                        break
+                    end_byte = offset + len(chunk) - 1
+                    ur = requests.put(
+                        upload_url,
+                        headers={
+                            "Content-Length": str(len(chunk)),
+                            "Content-Range": f"bytes {offset}-{end_byte}/{file_size}",
+                            "Content-Type": "video/*",
+                        },
+                        data=chunk,
+                        timeout=300,
+                        proxies=proxies,
+                    )
+                    if ur.status_code in (200, 201):
+                        vid_id = (ur.json() or {}).get("id", "")
+                        break
+                    elif ur.status_code == 308:
+                        offset += len(chunk)
+                        continue
+                    else:
+                        return False, f"YouTube upload ошибка ({ur.status_code}): {ur.text[:200]}"
+
+            if not vid_id:
+                return False, "YouTube не вернул ID загруженного видео"
+
+            if thumb_path and os.path.exists(thumb_path):
                 try:
-                    yt.thumbnails().set(videoId=vid_id, media_body=MediaFileUpload(thumb_path)).execute()
+                    with open(thumb_path, "rb") as tf:
+                        requests.post(
+                            "https://www.googleapis.com/upload/youtube/v3/thumbnails/set",
+                            params={"videoId": vid_id, "uploadType": "media"},
+                            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "image/jpeg"},
+                            data=tf.read(),
+                            timeout=60,
+                            proxies=proxies,
+                        )
                 except Exception:
                     pass
-            return True, f"YouTube: видео загружено! https://youtu.be/{vid_id}"
-        except ImportError:
-            pass
+            return True, f"https://youtu.be/{vid_id}"
         except Exception as exc:
             return False, f"YouTube API: {exc}"
 
     _reveal_file(video_path)
     _open_url("https://studio.youtube.com/")
-    return True, "YouTube Studio открыт, файл выделен в папке (заголовок, описание и теги скопированы)"
+    return True, "YouTube Studio открыт (чтобы заливать автоматически — нажмите «Войти в YouTube»)"
 
 
 def publish_to_tiktok(video_path: str) -> Tuple[bool, str]:

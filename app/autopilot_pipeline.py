@@ -443,9 +443,10 @@ def run_full_autopilot_for_file(
     # 4. Auto-upload to YouTube
     yt_url = ""
     if getattr(channel, "autopilot_youtube_upload", True):
-        secrets = (cfg.youtube_client_secrets or "").strip()
+        from .publisher import get_youtube_account_status
+        yt_st = get_youtube_account_status(cfg)
         privacy = getattr(channel, "autopilot_youtube_privacy", "unlisted") or "unlisted"
-        if secrets and os.path.exists(secrets):
+        if yt_st.get("connected"):
             _prog(68, f"Автопилот {part_tag}: загрузка на YouTube ({privacy})...")
             ok_yt, msg_yt = publish_to_youtube(
                 cfg,
@@ -464,7 +465,7 @@ def run_full_autopilot_for_file(
                 report["youtube_error"] = msg_yt
                 _log(f"[{channel.username}] Автопилот {part_tag}: ошибка YouTube — {msg_yt}")
         else:
-            _log(f"[{channel.username}] Автопилот {part_tag}: YouTube client_secrets.json не указан в Настройках — видео и обложка сохранены локально.")
+            _log(f"[{channel.username}] Автопилот {part_tag}: аккаунт YouTube не подключён (нажмите «Войти в YouTube» в Автопостинге или Настройках) — видео и обложка сохранены локально.")
 
     # 5. Optional Shorts 9:16 from this segment
     if getattr(channel, "autopilot_make_shorts", False):
