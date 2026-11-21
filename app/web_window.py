@@ -91,13 +91,15 @@ class StudioDesktopWindow(QMainWindow):
     def _setup_tray(self) -> None:
         self.tray = QSystemTrayIcon(make_app_icon(64, recording_dot=False), self)
         self.tray.setToolTip("Twitch Recorder Pro")
-        self._tray_menu = QMenu()
+        self._tray_menu = QMenu(self)
         self.tray.setContextMenu(self._tray_menu)
         self._rebuild_tray_menu()
-        self.tray.activated.connect(
-            lambda reason: self._restore_from_tray() if reason == QSystemTrayIcon.DoubleClick else None
-        )
+        self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
+
+    def _on_tray_activated(self, reason) -> None:
+        if reason in (QSystemTrayIcon.DoubleClick, QSystemTrayIcon.Trigger):
+            self._restore_from_tray()
 
     def _rebuild_tray_menu(self) -> None:
         menu = self._tray_menu
@@ -141,21 +143,69 @@ class StudioDesktopWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    def _quit_completely(self) -> None:
-        self._force_quit = True
-        self.close()
+    def _perform_shutdown_and_exit(self, ask_confirm: bool = True) -> bool:
+        import os
+        import threading
 
-    def quit_for_update(self) -> None:
-        """Force clean shutdown & exit so the detached updater script can swap binaries and relaunch."""
+        if getattr(self, "_is_shutting_down", False):
+            return True
+
+        active = self.bridge.active_count()
+        if ask_confirm and active > 0:
+            self._restore_from_tray()
+            reply = QMessageBox.question(
+                self,
+                "Выход из программы",
+                f"Сейчас выполняются активные задачи ({active}).\nКорректно завершить их и выйти?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                self._force_quit = False
+                return False
+
+        self._is_shutting_down = True
         self._force_quit = True
-        self.bridge.shutdown()
-        self.media_server.stop()
-        self.tray.hide()
+        try:
+            self.tray.hide()
+            self.hide()
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents()
+        except Exception:
+            pass
+
+        try:
+            self.bridge.shutdown()
+        except Exception:
+            pass
+
+        # Stop local HTTP media server on a daemon thread so an active video stream can never deadlock exit
+        threading.Thread(target=self.media_server.stop, daemon=True).start()
+
+        # Hard fallback so Windows never leaves a ghost tray icon or hung QtWebEngine process
+        t = threading.Timer(2.0, lambda: os._exit(0))
+        t.daemon = True
+        t.start()
+
         app = QApplication.instance()
         if app is not None:
             app.quit()
+        return True
+
+    def _quit_completely(self) -> None:
+        # Execute shutdown directly (do NOT rely on self.close(), which Qt ignores when window is hidden in tray!)
+        self._perform_shutdown_and_exit(ask_confirm=True)
+
+    def quit_for_update(self) -> None:
+        """Force clean shutdown & exit so the detached updater script can swap binaries and relaunch."""
+        self._perform_shutdown_and_exit(ask_confirm=False)
 
     def closeEvent(self, event) -> None:
+        if getattr(self, "_is_shutting_down", False):
+            event.accept()
+            return
+
         if self.bridge.config.minimize_to_tray and not self._force_quit:
             self.hide()
             self.tray.showMessage(
@@ -167,24 +217,7 @@ class StudioDesktopWindow(QMainWindow):
             event.ignore()
             return
 
-        active = self.bridge.active_count()
-        if active > 0:
-            reply = QMessageBox.question(
-                self,
-                "Выход из программы",
-                f"Сейчас выполняются активные задачи ({active}).\nКорректно завершить их и выйти?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
-                self._force_quit = False
-                event.ignore()
-                return
-
-        self.bridge.shutdown()
-        self.media_server.stop()
-        self.tray.hide()
-        event.accept()
-        app = QApplication.instance()
-        if app is not None:
-            app.quit()
+        if self._perform_shutdown_and_exit(ask_confirm=True):
+            event.accept()
+        else:
+            event.ignore()
