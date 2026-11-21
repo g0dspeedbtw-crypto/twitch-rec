@@ -1313,3 +1313,302 @@ EXPORT_PRESETS = {
     "telegram_2gb": {"label": "Telegram — до 2 ГБ", "max_mb": 1900, "height": 1080, "fps": 60, "cq": 22, "audio_kbps": 160},
     "discord_25mb": {"label": "Discord — до 25 МБ", "max_mb": 23, "height": 720, "fps": 30, "cq": 26, "audio_kbps": 96},
 }
+
+
+def extract_timeline_assets(video_path: str, num_frames: int = 12, num_peaks: int = 120) -> dict:
+    """
+    Fast NLE timeline asset generator:
+      1. Filmstrip sprite image (num_frames thumbnails stitched horizontally)
+      2. Audio waveform peak array (num_peaks floats in 0.0..1.0)
+    Runs in ~1-2 seconds even on multi-hour recordings by seeking directly to keyframes!
+    """
+    import hashlib
+    import struct
+    from app.config import DATA_DIR
+
+    ffmpeg = get_ffmpeg_path()
+    if not ffmpeg or not video_path or not os.path.exists(video_path):
+        return {"ok": False, "strip_path": "", "peaks": []}
+
+    info = probe_video(video_path)
+    dur = max(1.0, float(info.get("duration") or 60.0))
+
+    cache_dir = DATA_DIR / "timeline_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    sig = hashlib.md5(f"{video_path}|{os.path.getsize(video_path)}|{int(os.path.getmtime(video_path))}".encode()).hexdigest()[:12]
+    strip_path = cache_dir / f"strip_{sig}.jpg"
+    peaks_path = cache_dir / f"peaks_{sig}.json"
+
+    peaks: List[float] = []
+    if peaks_path.exists():
+        try:
+            peaks = json.loads(peaks_path.read_text(encoding="utf-8"))
+        except Exception:
+            peaks = []
+
+    # 1. Generate Filmstrip sprite via fast keyframe seeks
+    if not strip_path.exists():
+        tmp_dir = Path(tempfile.mkdtemp(prefix="tr_strip_"))
+        try:
+            frame_paths: List[str] = []
+            for i in range(num_frames):
+                ts = max(0.2, (dur * (i + 0.5)) / num_frames)
+                fp = str(tmp_dir / f"f_{i:02d}.jpg")
+                r = subprocess.run(
+                    [
+                        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                        "-ss", f"{ts:.2f}", "-i", video_path,
+                        "-frames:v", "1", "-vf", "scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2:black",
+                        "-q:v", "6", fp,
+                    ],
+                    creationflags=CREATE_NO_WINDOW,
+                    timeout=10,
+                )
+                if r.returncode == 0 and os.path.exists(fp):
+                    frame_paths.append(fp)
+            if frame_paths:
+                inputs: List[str] = []
+                for fp in frame_paths:
+                    inputs.extend(["-i", fp])
+                n = len(frame_paths)
+                if n == 1:
+                    shutil.copy2(frame_paths[0], str(strip_path))
+                else:
+                    subprocess.run(
+                        [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", *inputs, "-filter_complex", f"hstack=inputs={n}", "-q:v", "5", str(strip_path)],
+                        creationflags=CREATE_NO_WINDOW,
+                        timeout=15,
+                    )
+        except Exception:
+            pass
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # 2. Generate Audio Waveform peaks (fast 4kHz mono s16le downmix, capped at first 4h or sampled)
+    if not peaks:
+        try:
+            # For very long videos (> 20 min), sample 24 evenly spaced windows so waveform computes in < 1.5s
+            if dur > 1200:
+                buckets = max(24, min(num_peaks, 60))
+                raw_vals: List[float] = []
+                for i in range(buckets):
+                    ts = (dur * i) / buckets
+                    p = subprocess.run(
+                        [
+                            ffmpeg, "-hide_banner", "-loglevel", "error",
+                            "-ss", f"{ts:.1f}", "-t", "3", "-i", video_path,
+                            "-vn", "-ac", "1", "-ar", "4000", "-f", "s16le", "pipe:1",
+                        ],
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                        creationflags=CREATE_NO_WINDOW, timeout=8,
+                    )
+                    data = p.stdout or b""
+                    n_s = len(data) // 2
+                    if n_s > 0:
+                        samples = struct.unpack(f"<{n_s}h", data[: n_s * 2])
+                        peak = max(abs(x) for x in samples) / 32768.0
+                    else:
+                        peak = 0.05
+                    raw_vals.append(round(peak, 3))
+                # Upsample smoothly to num_peaks
+                peaks = [raw_vals[min(len(raw_vals) - 1, int(i * len(raw_vals) / num_peaks))] for i in range(num_peaks)]
+            else:
+                p = subprocess.run(
+                    [
+                        ffmpeg, "-hide_banner", "-loglevel", "error",
+                        "-i", video_path, "-vn", "-ac", "1", "-ar", "2000", "-f", "s16le", "pipe:1",
+                    ],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    creationflags=CREATE_NO_WINDOW, timeout=25,
+                )
+                data = p.stdout or b""
+                n_s = len(data) // 2
+                if n_s >= num_peaks:
+                    samples = struct.unpack(f"<{n_s}h", data[: n_s * 2])
+                    step = max(1, n_s // num_peaks)
+                    for i in range(num_peaks):
+                        seg = samples[i * step : (i + 1) * step]
+                        pk = (max(abs(x) for x in seg) / 32768.0) if seg else 0.0
+                        peaks.append(round(pk, 3))
+            if peaks:
+                mx = max(peaks) or 1.0
+                if mx > 0.01:
+                    peaks = [round(min(1.0, v / mx), 3) for v in peaks]
+                try:
+                    peaks_path.write_text(json.dumps(peaks), encoding="utf-8")
+                except Exception:
+                    pass
+        except Exception:
+            peaks = []
+
+    return {
+        "ok": True,
+        "duration": dur,
+        "strip_path": str(strip_path) if strip_path.exists() else "",
+        "peaks": peaks,
+    }
+
+
+def render_nle_project(
+    input_path: str,
+    output_path: str,
+    project: dict,
+    encoder: str = "auto",
+    video_quality: int = 20,
+    progress_cb=None,
+) -> Tuple[bool, str]:
+    """
+    Unified Pro Studio NLE Renderer:
+    Compiles clips (cuts/order/speed/mute), aspect ratio (16:9 / 9:16 / 1:1),
+    color grading (brightness/contrast/saturation/preset), timed text overlays,
+    and audio mastering (volume / EBU R128 loudnorm / DMCA Vocal Shield) in one reliable pipeline.
+    """
+    ffmpeg = get_ffmpeg_path()
+    if not ffmpeg or not os.path.exists(input_path):
+        return False, "FFmpeg или исходный файл не найден"
+
+    clips = [c for c in (project.get("clips") or []) if not c.get("disabled") and float(c.get("end", 0)) > float(c.get("start", 0)) + 0.15]
+    if not clips:
+        info = probe_video(input_path)
+        clips = [{"start": 0.0, "end": max(1.0, float(info.get("duration") or 60.0)), "speed": 1.0, "mute": False}]
+
+    fx = project.get("fx") or {}
+    texts = project.get("texts") or []
+    aspect = str(project.get("aspect") or "16:9")
+    audio_mode = str(project.get("audio_mode") or "normal")  # normal | loudnorm | dmca_vocal
+    enc = resolve_encoder(encoder)
+    cq = int(project.get("cq") or video_quality or 20)
+
+    # Build shared video filter chain (color + aspect + timed text overlays)
+    v_filters: List[str] = []
+    preset = fx.get("color_preset", "none")
+    br = float(fx.get("brightness", 0.0) or 0.0)
+    ct = float(fx.get("contrast", 1.0) or 1.0)
+    st = float(fx.get("saturation", 1.0) or 1.0)
+    if preset == "vibrant":
+        ct = max(ct, 1.08)
+        st = max(st, 1.28)
+    elif preset == "cinema":
+        ct = max(ct, 1.12)
+        st = min(st, 0.90)
+    elif preset == "crisp":
+        v_filters.append("unsharp=5:5:0.8:5:5:0.0")
+    if abs(br) > 0.005 or abs(ct - 1.0) > 0.005 or abs(st - 1.0) > 0.005:
+        v_filters.append(f"eq=brightness={br:.3f}:contrast={ct:.3f}:saturation={st:.3f}")
+
+    if aspect == "9:16":
+        v_filters.append(
+            "split=2[bg][fg];[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=24:6[bgb];"
+            "[fg]scale=1080:-2[fgs];[bgb][fgs]overlay=(W-w)/2:(H-h)/2"
+        )
+    elif aspect == "1:1":
+        v_filters.append("crop=min(iw\\,ih):min(iw\\,ih),scale=1080:1080")
+
+    # Render each clip to temp segment (clean A/V sync even with per-clip speed & mute), then concat & apply global text/audio
+    tmp_dir = Path(tempfile.mkdtemp(prefix="tr_nle_"))
+    try:
+        seg_files: List[str] = []
+        total_clips = len(clips)
+        for idx, c in enumerate(clips):
+            if progress_cb:
+                progress_cb(int((idx / max(1, total_clips)) * 65), f"Рендер клипа {idx + 1}/{total_clips}...")
+            s = max(0.0, float(c.get("start", 0.0)))
+            e = max(s + 0.2, float(c.get("end", s + 1.0)))
+            spd = max(0.5, min(2.0, float(c.get("speed", 1.0) or 1.0)))
+            is_muted = bool(c.get("mute", False))
+
+            seg_vf = list(v_filters)
+            if abs(spd - 1.0) > 0.01:
+                seg_vf.append(f"setpts={1.0 / spd:.4f}*PTS")
+
+            af_parts: List[str] = []
+            if is_muted:
+                af_parts.append("volume=0")
+            elif abs(spd - 1.0) > 0.01:
+                af_parts.append(f"atempo={spd:.3f}")
+            if audio_mode == "dmca_vocal" and not is_muted:
+                af_parts.append("pan=mono|c0=0.5*c0+0.5*c1,highpass=f=120,lowpass=f=4200,afftdn=nf=-22:tn=1,dynaudnorm=f=150:g=15,pan=stereo|c0=c0|c1=c0")
+            elif audio_mode == "loudnorm" and not is_muted:
+                af_parts.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+
+            out_seg = str(tmp_dir / f"clip_{idx:03d}.mp4")
+            cmd = [
+                ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                "-ss", f"{s:.3f}", "-to", f"{e:.3f}", "-i", input_path,
+            ]
+            if seg_vf:
+                if any("split=2" in x for x in seg_vf):
+                    cmd.extend(["-filter_complex", ",".join(seg_vf)])
+                else:
+                    cmd.extend(["-vf", ",".join(seg_vf)])
+            if af_parts:
+                cmd.extend(["-af", ",".join(af_parts)])
+            cmd.extend([
+                *encoder_ffmpeg_args(enc, cq),
+                "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                "-movflags", "+faststart", out_seg,
+            ])
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, creationflags=CREATE_NO_WINDOW)
+            if r.returncode == 0 and os.path.exists(out_seg) and os.path.getsize(out_seg) > 5000:
+                seg_files.append(out_seg)
+            else:
+                return False, f"Ошибка рендера клипа #{idx + 1}: {(r.stderr or '')[-200:]}"
+
+        if not seg_files:
+            return False, "Не удалось собрать ни одного клипа"
+
+        if progress_cb:
+            progress_cb(72, "Сборка таймлайна...")
+
+        merged_path = str(tmp_dir / "merged.mp4") if texts else output_path
+        if len(seg_files) == 1:
+            shutil.copy2(seg_files[0], merged_path)
+        else:
+            ok_c, msg_c = concat_videos(seg_files, merged_path, normalize_clips=False)
+            if not ok_c:
+                return False, f"Ошибка склейки клипов: {msg_c}"
+
+        # Apply timed text overlays on final timeline if present
+        if texts:
+            if progress_cb:
+                progress_cb(84, f"Наложение текстовых титров ({len(texts)})...")
+            draw_chain: List[str] = []
+            for t_item in texts:
+                raw_txt = str(t_item.get("text") or "").strip()
+                if not raw_txt:
+                    continue
+                esc_txt = raw_txt.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'").replace("%", "\\%")
+                ts_s = max(0.0, float(t_item.get("start", 0.0)))
+                ts_e = max(ts_s + 0.5, float(t_item.get("end", ts_s + 4.0)))
+                fsz = max(18, min(96, int(t_item.get("size", 42) or 42)))
+                col = str(t_item.get("color") or "#ffffff").strip()
+                pos = str(t_item.get("pos") or "bottom")
+                y_expr = "h*0.10" if pos == "top" else ("(h-text_h)/2" if pos == "middle" else "h-text_h-h*0.10")
+                draw_chain.append(
+                    f"drawtext=text='{esc_txt}':fontcolor={col}:fontsize={fsz}:"
+                    f"borderw=3:bordercolor=black@0.85:shadowx=2:shadowy=2:shadowcolor=black@0.7:"
+                    f"x=(w-text_w)/2:y={y_expr}:enable='between(t,{ts_s:.2f},{ts_e:.2f})'"
+                )
+            if draw_chain:
+                cmd_t = [
+                    ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                    "-i", merged_path,
+                    "-vf", ",".join(draw_chain),
+                    *encoder_ffmpeg_args(enc, cq),
+                    "-c:a", "copy", "-movflags", "+faststart",
+                    output_path,
+                ]
+                rt = subprocess.run(cmd_t, capture_output=True, text=True, timeout=3600, creationflags=CREATE_NO_WINDOW)
+                if rt.returncode != 0 or not os.path.exists(output_path):
+                    # Fallback if system ffmpeg lacks libfreetype drawtext: keep merged video
+                    shutil.copy2(merged_path, output_path)
+            else:
+                shutil.copy2(merged_path, output_path)
+
+        if progress_cb:
+            progress_cb(100, "Экспорт проекта завершён!")
+        return True, output_path
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)

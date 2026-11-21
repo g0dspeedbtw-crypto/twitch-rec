@@ -1793,6 +1793,86 @@ class AppBridge(QObject):
             "chat_path": str(chat_path) if chat_path.exists() else "",
         }, ensure_ascii=False)
 
+    @Slot(str)
+    def loadStudioTimelineAssets(self, path: str) -> None:
+        """Async generator for NLE Filmstrip sprite + Audio Waveform peaks."""
+        if not path or not os.path.exists(path):
+            return
+        bridge = self
+
+        class _AssetsWorker(QThread):
+            ready = Signal(dict)
+
+            def run(self) -> None:
+                from app.tools import extract_timeline_assets
+                res = extract_timeline_assets(path)
+                res["video_path"] = path
+                self.ready.emit(res)
+
+        aw = _AssetsWorker(self)
+
+        def _done(res: dict) -> None:
+            if res.get("strip_path"):
+                bridge.allow_media_file(res["strip_path"])
+            bridge._emit("studio_assets", res)
+            if aw in bridge._aux_workers:
+                bridge._aux_workers.remove(aw)
+
+        aw.ready.connect(_done)
+        self._aux_workers.append(aw)
+        aw.start()
+
+    @Slot(str)
+    def renderNleProject(self, payload_json: str) -> None:
+        """Unified NLE Project Export (clips, order, speeds, color, aspect, timed texts, audio/DMCA)."""
+        try:
+            payload = json.loads(payload_json)
+        except Exception:
+            self._toast("Экспорт проекта", "Некорректные данные проекта", "error")
+            return
+        input_path = str(payload.get("input_path") or "")
+        if not input_path or not os.path.exists(input_path):
+            self._toast("Экспорт проекта", "Исходное видео не найдено", "error")
+            return
+        p = Path(input_path)
+        aspect = str(payload.get("aspect") or "16:9").replace(":", "x")
+        out_path = str(payload.get("output_path") or p.with_name(f"{p.stem}_edit_{aspect}.mp4"))
+        jid = uuid.uuid4().hex[:8]
+        n_clips = len([c for c in (payload.get("clips") or []) if not c.get("disabled")])
+        n_texts = len(payload.get("texts") or [])
+        self._register_job(jid, "studio", f"🎬 Экспорт проекта ({n_clips} клип., {n_texts} титр.)", p.name, "running")
+        enc = self.config.encoder
+        cq = int(payload.get("cq") or self.config.video_quality or 20)
+        bridge = self
+
+        class _NleWorker(QThread):
+            prog = Signal(int, str)
+            done = Signal(bool, str)
+
+            def run(self) -> None:
+                from app.tools import render_nle_project
+                ok, msg = render_nle_project(
+                    input_path, out_path, payload,
+                    encoder=enc, video_quality=cq,
+                    progress_cb=lambda pct, txt: self.prog.emit(pct, txt),
+                )
+                self.done.emit(ok, msg)
+
+        nw = _NleWorker(self)
+        nw.prog.connect(lambda pct, txt: bridge._update_job(jid, progress=pct, status=txt, state="running"))
+
+        def _finish(ok: bool, msg: str) -> None:
+            bridge._update_job(jid, progress=100 if ok else 0, status="Готово!" if ok else msg[:80], state="done" if ok else "error", output_path=out_path if ok else "")
+            bridge._log(f"[NLE Студия] Экспорт {'завершён: ' + out_path if ok else 'ошибка: ' + msg}")
+            bridge._toast("Экспорт проекта", f"Сохранено: {Path(out_path).name}" if ok else msg, "success" if ok else "error")
+            if nw in bridge._aux_workers:
+                bridge._aux_workers.remove(nw)
+            bridge.refreshLibrary()
+
+        nw.done.connect(_finish)
+        self._aux_workers.append(nw)
+        nw.start()
+
     @Slot(str, float, result=str)
     def saveStudioFrame(self, video_path: str, ts: float) -> str:
         if not video_path or not os.path.exists(video_path):
