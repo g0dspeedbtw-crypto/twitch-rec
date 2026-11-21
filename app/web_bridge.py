@@ -2918,8 +2918,25 @@ class AppBridge(QObject):
             self._update_dl_worker.wait(1500)
         if self._update_check_worker and self._update_check_worker.isRunning():
             self._update_check_worker.wait(1000)
+        try:
+            if hasattr(self, "schedule_timer") and self.schedule_timer.isActive():
+                self.schedule_timer.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_mobile_server") and self._mobile_server:
+                self._mobile_server.stop()
+        except Exception:
+            pass
         for w in list(self._aux_workers):
-            if w.isRunning():
-                w.terminate()
-                w.wait(500)
-        self.config.save()
+            try:
+                if w is not None and w.isRunning():
+                    w.terminate()
+                    w.wait(500)
+            except Exception:
+                pass
+        self._aux_workers.clear()
+        try:
+            self.config.save()
+        except Exception:
+            pass

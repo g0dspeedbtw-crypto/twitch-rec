@@ -1259,6 +1259,14 @@
         <div class="nle-monitor-card">
           <div class="nle-monitor-stage">
             <video id="studioMonitor" src="${videoPlayUrl(state.studioFile, state.studioSeekOffset || 0)}" playsinline autoplay muted></video>
+            <div class="player-overlay hidden" id="stMonOverlay" style="background:rgba(5,6,10,0.65);z-index:6;">
+              <div class="spinner" id="stMonSpinner"></div>
+              <div id="stMonOverlayTxt" style="font-size:12.5px;color:#e4e4e7;">Загрузка видео...</div>
+              <div class="input-row hidden" id="stMonErrBtns" style="gap:8px;margin-top:6px;">
+                <button class="btn btn-primary btn-sm" id="stMonRetry">Повторить</button>
+                <button class="btn btn-soft btn-sm" id="stMonRepair">🩺 Починить файл (MP4 Доктор)</button>
+              </div>
+            </div>
             <div class="monitor-shorts-guide ${state.nle.aspect === "9:16" ? "" : "hidden"}" id="monShortsGuide"><span>9:16 SHORTS</span></div>
             <div class="nle-monitor-text hidden" id="monNleText"></div>
             <div class="monitor-sub-preview hidden" id="monSubPreview"></div>
@@ -1375,6 +1383,25 @@
     };
     mon.onplay = syncPlayBtn;
     mon.onpause = syncPlayBtn;
+    mon.onloadstart = () => {
+      $("#stMonOverlay")?.classList.remove("hidden");
+      $("#stMonSpinner")?.classList.remove("hidden");
+      $("#stMonErrBtns")?.classList.add("hidden");
+      const t = $("#stMonOverlayTxt");
+      if (t) t.textContent = "Загрузка кадра...";
+    };
+    mon.oncanplay = () => { $("#stMonOverlay")?.classList.add("hidden"); };
+    mon.onplaying = () => { $("#stMonOverlay")?.classList.add("hidden"); };
+    mon.onerror = () => {
+      if (!state.studioFile || !mon.getAttribute("src")) return;
+      $("#stMonOverlay")?.classList.remove("hidden");
+      $("#stMonSpinner")?.classList.add("hidden");
+      $("#stMonErrBtns")?.classList.remove("hidden");
+      const t = $("#stMonOverlayTxt");
+      if (t) t.textContent = "Не удалось декодировать кадр (возможно, повреждён контейнер)";
+    };
+    $("#stMonRetry")?.addEventListener("click", () => seekStudioMonitor(getStudioTime(), true));
+    $("#stMonRepair")?.addEventListener("click", () => callBackend("repairVideoFile", state.studioFile));
     mon.ontimeupdate = () => {
       const dur = getStudioDuration();
       const cur = Math.min(dur, getStudioTime());
@@ -4356,6 +4383,12 @@
 
   // ==================== STARTUP ====================
   function initApp() {
+    window.addEventListener("error", (ev) => {
+      try { console.error("[UI Error]", ev.message); } catch {}
+    });
+    window.addEventListener("unhandledrejection", (ev) => {
+      try { console.error("[UI Promise]", ev.reason); } catch {}
+    });
     hydrateIcons(document);
 
     // Prevent accidental WebEngine navigation when dragging files onto the window
@@ -4427,12 +4460,6 @@
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
         doSeek(5);
-      } else if (k === "i" && activeVid.id === "studioMonitor") {
-        e.preventDefault();
-        $("#tlBtnIn")?.click();
-      } else if (k === "o" && activeVid.id === "studioMonitor") {
-        e.preventDefault();
-        $("#tlBtnOut")?.click();
       } else if (k === "s" && activeVid.id === "studioMonitor" && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         nleSplitAtPlayhead();

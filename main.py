@@ -47,10 +47,35 @@ def _maybe_run_internal_cli() -> bool:
     return False
 
 
+def _install_crash_logger() -> None:
+    import threading
+    import traceback
+
+    def _log_exc(prefix: str, exc_type, exc_value, exc_tb) -> None:
+        try:
+            from app.config import get_file_logger
+            tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+            get_file_logger().error("%s:\n%s", prefix, tb_text)
+        except Exception:
+            pass
+
+    def _sys_hook(exc_type, exc_value, exc_tb) -> None:
+        _log_exc("UNHANDLED_EXCEPTION", exc_type, exc_value, exc_tb)
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    def _thread_hook(args) -> None:
+        _log_exc(f"THREAD_EXCEPTION ({getattr(args.thread, 'name', 'worker')})", args.exc_type, args.exc_value, args.exc_traceback)
+
+    sys.excepthook = _sys_hook
+    if hasattr(threading, "excepthook"):
+        threading.excepthook = _thread_hook
+
+
 def main() -> int:
     multiprocessing.freeze_support()
     if _maybe_run_internal_cli():
         return 0
+    _install_crash_logger()
 
     from PySide6.QtWidgets import QApplication
     from app.web_window import StudioDesktopWindow

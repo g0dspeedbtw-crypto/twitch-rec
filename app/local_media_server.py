@@ -40,6 +40,8 @@ class LocalMediaServer:
         self.live_previews: Dict[str, bytes] = {}
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
+        self._webm_lock = threading.Lock()
+        self._active_webm_proc = None
         self.port: int = 0
 
     def is_path_allowed(self, file_path: str) -> bool:
@@ -252,18 +254,27 @@ class LocalMediaServer:
                     "-ss", f"{max(0.0, start_sec):.3f}",
                     "-i", file_path,
                     "-map", "0:v:0", "-map", "0:a:0?",
-                    "-vf", "scale='min(1280,iw)':-2",
-                    "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8",
-                    "-threads", "4", "-b:v", "2400k", "-maxrate", "3200k", "-bufsize", "4800k",
+                    "-vf", "scale='min(960,iw)':-2",
+                    "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "10",
+                    "-threads", "3", "-b:v", "1800k", "-maxrate", "2400k", "-bufsize", "3600k",
                     "-g", "60", "-pix_fmt", "yuv420p",
                     "-c:a", "libopus", "-b:a", "96k", "-ac", "2",
                     "-f", "webm", "pipe:1",
                 ]
                 ff_proc = None
                 try:
-                    ff_proc = subprocess.Popen(
-                        ff_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW
-                    )
+                    # Immediately terminate any previous WebM preview FFmpeg process so scrubbing never stacks processes
+                    with parent._webm_lock:
+                        prev = parent._active_webm_proc
+                        if prev is not None and prev.poll() is None:
+                            try:
+                                prev.kill()
+                            except Exception:
+                                pass
+                        ff_proc = subprocess.Popen(
+                            ff_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW
+                        )
+                        parent._active_webm_proc = ff_proc
                     assert ff_proc.stdout is not None
                     first_chunk = ff_proc.stdout.read(16384)
                     if not first_chunk:
