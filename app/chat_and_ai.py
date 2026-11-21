@@ -747,28 +747,60 @@ class WhisperAIWorker(QThread):
         self.progress_updated.emit(self.job_id, 5.0, f"Загрузка модели Whisper ({self.model_size})...")
         self.log_message.emit(f"[AI] Загрузка Whisper «{self.model_size}» для {Path(self.video_path).name}...")
 
+        import sys as _sys
+        import tempfile as _tf
+        from app.config import DATA_DIR
+
+        models_dir = DATA_DIR / "whisper_models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+
         model = None
-        # Try CUDA first (RTX 4060 Ti), smoothly fall back to int8 CPU if cuDNN dll isn't on PATH
-        for dev, ctype in (("cuda", "float16"), ("cpu", "int8")):
+        last_err = ""
+        dev_plan = (("cpu", "int8"), ("cpu", "float32")) if _sys.platform == "darwin" else (("cuda", "float16"), ("cpu", "int8"), ("cpu", "float32"))
+        for dev, ctype in dev_plan:
             try:
-                model = WhisperModel(self.model_size, device=dev, compute_type=ctype)
+                model = WhisperModel(
+                    self.model_size,
+                    device=dev,
+                    compute_type=ctype,
+                    download_root=str(models_dir),
+                )
                 self.log_message.emit(f"[AI] Модель Whisper загружена на устройстве: {dev} ({ctype})")
                 break
-            except Exception:
+            except Exception as exc:
+                last_err = str(exc)
                 continue
 
         if model is None:
-            self.log_message.emit("[AI] Не удалось инициализировать модель Whisper.")
+            self.log_message.emit(f"[AI] Не удалось инициализировать модель Whisper: {last_err}")
+            self.progress_updated.emit(self.job_id, 0.0, f"Ошибка Whisper: {last_err[:55]}")
             self.finished_ai.emit(self.job_id, "", False)
             return
 
         meta = probe_video(self.video_path)
         total_dur = max(1.0, meta.get("duration", 0.0))
 
+        # Pre-extract 16kHz mono WAV via FFmpeg so Whisper never fails on Twitch fragmented MP4/MKV containers
+        wav_tmp = ""
+        transcribe_target = self.video_path
+        ffmpeg = get_ffmpeg_path()
+        if ffmpeg:
+            try:
+                self.progress_updated.emit(self.job_id, 10.0, "Подготовка аудио для Whisper...")
+                wav_tmp = os.path.join(_tf.gettempdir(), f"tr_whisper_{self.job_id}.wav")
+                rc, _ = self._run_ffmpeg_cancellable(
+                    [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", self.video_path, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav_tmp],
+                    timeout=600,
+                )
+                if rc == 0 and os.path.exists(wav_tmp) and os.path.getsize(wav_tmp) > 4000:
+                    transcribe_target = wav_tmp
+            except Exception:
+                pass
+
         try:
             self.progress_updated.emit(self.job_id, 15.0, "Распознавание речи...")
             segments_gen, _ = model.transcribe(
-                self.video_path,
+                transcribe_target,
                 language=self.language if self.language != "auto" else None,
                 task=self.task,
                 initial_prompt=self.initial_prompt or None,
@@ -798,6 +830,12 @@ class WhisperAIWorker(QThread):
             self.log_message.emit(f"[AI] Ошибка распознавания: {exc}")
             self.progress_updated.emit(self.job_id, 0.0, f"Ошибка: {str(exc)[:60]}")
             self.finished_ai.emit(self.job_id, "", False)
+        finally:
+            if wav_tmp and os.path.exists(wav_tmp):
+                try:
+                    os.remove(wav_tmp)
+                except Exception:
+                    pass
 
     def _finish_subtitles(self, segments) -> None:
         p = Path(self.video_path)

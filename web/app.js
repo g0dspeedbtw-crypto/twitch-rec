@@ -2410,10 +2410,12 @@
 
     const genAiPkg = (alsoCover) => {
       syncPubInputs();
-      if (!pub.videoPath) return showToast("Автопостинг AI", "Сначала выберите видеофайл", "error");
-      pub._autoGenCoverNext = !!alsoCover;
+      if (!pub.videoPath && state.library.length) {
+        pub.videoPath = state.library[0].path;
+      }
+      pub._autoGenCoverNext = !!alsoCover && !!pub.videoPath;
       callBackend("runAiSuiteTask", "publish_package", JSON.stringify({
-        video_path: pub.videoPath,
+        video_path: pub.videoPath || "",
         format_mode: pub.formatMode,
         platforms: pub.platforms,
       }));
