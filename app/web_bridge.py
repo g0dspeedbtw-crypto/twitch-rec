@@ -469,11 +469,23 @@ class AppBridge(QObject):
 
         # System sleep prevention during active recordings & renders + auto-sleep after finish
         from app.services import SleepInhibitor
+        from app.broadcast_suite import MobileRemoteServer, list_workspaces
         self._sleep_inhibitor = SleepInhibitor()
         self._had_active_work = False
         self._sleep_timer = QTimer(self)
         self._sleep_timer.setSingleShot(True)
         self._sleep_timer.timeout.connect(self._execute_auto_sleep)
+
+        # v4.0 Scheduled Posts Content Calendar timer (checks every 30s)
+        self.schedule_timer = QTimer(self)
+        self.schedule_timer.timeout.connect(self._check_scheduled_posts)
+        self.schedule_timer.start(30_000)
+
+        # v4.0 Mobile Wi-Fi Remote Control Server + Workspaces
+        self._active_workspace, _ = list_workspaces()
+        self._mobile_remote = MobileRemoteServer(self._mobile_get_state, self._mobile_dispatch_action)
+        self._mobile_remote_url = ""
+        self._sync_mobile_remote()
 
         # Global F9 Hotkey (#19)
         self._hotkey = GlobalHotkeyMonitor(self.config.marker_hotkey, self)
@@ -736,6 +748,7 @@ class AppBridge(QObject):
             "schedule_enabled", "schedule_start", "schedule_end", "schedule_days",
             "auto_scene_by_game", "live_auto_clip", "auto_clip_threshold",
             "chat_trigger_words", "separate_audio_track",
+            "autopilot_enabled", "autopilot_shorts_count", "autopilot_send_telegram",
         ):
             if field_name in patch:
                 setattr(ch, field_name, patch[field_name])
@@ -952,6 +965,12 @@ class AppBridge(QObject):
             if needs_post_blur and ch and ch.blur_regions:
                 for fp in files:
                     self._enqueue_blur_job(fp, ch.blur_regions, delete_original=not ch.keep_original, normalize_audio=self.config.normalize_audio_default, force_now=False)
+            else:
+                if self.config.cloud_upload_enabled:
+                    for fp in files:
+                        self._trigger_cloud_upload(fp)
+                if ch and getattr(ch, "autopilot_enabled", False):
+                    self._trigger_channel_autopilot(ch, files[0])
         elif key not in self.manually_stopped:
             self._toast("Не удалось записать эфир", f"{ch.username if ch else key} — поток оффлайн или недоступен", "error")
 
@@ -1630,6 +1649,10 @@ class AppBridge(QObject):
             "game_mode_enabled", "game_processes", "whisper_model", "whisper_prompt", "banned_words",
             "llm_api_url", "llm_api_key", "llm_model", "ai_brand_voice", "local_ai_model",
             "youtube_client_secrets", "vk_access_token", "vk_group_id",
+            "vod_rate_limit_mbps", "cloud_upload_enabled", "cloud_upload_dir",
+            "cloud_webdav_url", "cloud_webdav_user", "cloud_webdav_pass", "cloud_delete_local_after_upload",
+            "obs_ws_host", "obs_ws_port", "obs_ws_password",
+            "mobile_remote_enabled", "mobile_remote_port", "mobile_remote_pin",
             "chat_position", "chat_font_size", "chat_hide_bots", "watermark_path",
             "theme", "compact_cards", "github_repo", "auto_check_updates",
             "smart_segment_blur", "native_os_notifications", "auto_publish_telegram",
@@ -1644,6 +1667,7 @@ class AppBridge(QObject):
         self._hotkey.set_key(self.config.marker_hotkey)
         self.monitor_timer.start(max(10, self.config.check_interval_sec) * 1000)
         self._sync_telegram_bot()
+        self._sync_mobile_remote()
         self._emit("config", asdict(self.config))
         self._emit("diagnostics", self._build_diagnostics())
         self._toast("Настройки сохранены", "Все параметры применены", "success")
@@ -2356,9 +2380,270 @@ class AppBridge(QObject):
     def active_count(self) -> int:
         return len(self.live_recorders) + len(self.vod_workers) + len(self.blur_workers) + len(self.studio_workers)
 
+    # ------------------------------------------------------------------ v4.0 Broadcast & Autopilot Suite
+    def _sync_mobile_remote(self) -> None:
+        if getattr(self.config, "mobile_remote_enabled", False):
+            ok, url = self._mobile_remote.start(
+                int(getattr(self.config, "mobile_remote_port", 8765) or 8765),
+                str(getattr(self.config, "mobile_remote_pin", "1234") or "1234"),
+            )
+            self._mobile_remote_url = url if ok else ""
+            if ok:
+                self._log(f"[Веб-пульт] Запущен по Wi-Fi: {url}")
+            else:
+                self._log(f"[Веб-пульт] Ошибка запуска: {url}")
+        else:
+            self._mobile_remote.stop()
+            self._mobile_remote_url = ""
+
+    def _mobile_get_state(self) -> dict:
+        chs = []
+        for c in self.config.channels:
+            st = self.statuses.get(c.key)
+            chs.append({
+                "key": c.key,
+                "username": c.username,
+                "is_live": bool(st and st.is_live),
+                "is_recording": c.key in self.live_recorders,
+                "game": (st.game if st else "") or "",
+            })
+        return {"channels": chs, "active_count": self.active_count()}
+
+    def _mobile_dispatch_action(self, cmd: str, key: str) -> None:
+        def _run() -> None:
+            if cmd == "rec_all":
+                self.recordAllOnline()
+            elif cmd == "stop_all":
+                self.stopAllRecordings()
+            elif cmd == "rec" and key:
+                self.startRecording(key)
+            elif cmd == "stop" and key:
+                self.stopRecording(key)
+            elif cmd == "marker" and key:
+                self.dropMarker(key)
+            elif cmd == "dvr" and key:
+                self.clipLastSeconds(key, 60)
+        QTimer.singleShot(0, _run)
+
+    def _trigger_cloud_upload(self, file_path: str) -> None:
+        cfg_copy = deepcopy(self.config)
+        bridge = self
+
+        class _CloudUpWorker(QThread):
+            done = Signal(bool, str)
+
+            def run(self) -> None:
+                from app.broadcast_suite import upload_file_to_cloud_storage
+                ok, msg = upload_file_to_cloud_storage(file_path, cfg_copy)
+                self.done.emit(ok, msg)
+
+        cw = _CloudUpWorker(self)
+        cw.done.connect(lambda ok, msg: (
+            bridge._log(f"[Облако] {msg}"),
+            bridge._toast("Облачная выгрузка", msg, "success" if ok else "error"),
+            bridge._aux_workers.remove(cw) if cw in bridge._aux_workers else None,
+        ))
+        self._aux_workers.append(cw)
+        cw.start()
+
+    def _trigger_channel_autopilot(self, ch: ChannelConfig, video_path: str) -> None:
+        """v4.0 Autopilot: after stream ends -> find top viral clips -> render Shorts 9:16 -> send to Telegram."""
+        cfg_copy = deepcopy(self.config)
+        count = max(1, min(6, int(getattr(ch, "autopilot_shorts_count", 3) or 3)))
+        send_tg = bool(getattr(ch, "autopilot_send_telegram", True))
+        bridge = self
+        self._log(f"[Автопилот] Запуск для {ch.username}: поиск топ-{count} вирусных клипов -> Shorts 9:16...")
+
+        class _AutoPilotWorker(QThread):
+            done = Signal(bool, str)
+
+            def run(self) -> None:
+                from app.ai_suite import find_viral_clips
+                from app.services import send_telegram_video_async
+                from app.tools import build_shorts_9_16_filter, encoder_ffmpeg_args, get_ffmpeg_path, resolve_encoder
+                clips = find_viral_clips(video_path, "", cfg_copy, max_clips=count)
+                if not clips:
+                    self.done.emit(False, f"Автопилот ({ch.username}): вирусных пиков не найдено")
+                    return
+                ffmpeg = get_ffmpeg_path()
+                if not ffmpeg:
+                    self.done.emit(False, "FFmpeg не найден")
+                    return
+                enc = resolve_encoder(cfg_copy.encoder)
+                out_dir = Path(video_path).parent / "AutoPilot_Shorts"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                made = 0
+                for idx, c in enumerate(clips, 1):
+                    s = max(0.0, float(c.get("start_sec", 0)))
+                    dur = max(10.0, float(c.get("end_sec", s + 35)) - s)
+                    out_p = str(out_dir / f"{Path(video_path).stem}_short{idx}.mp4")
+                    fg, extra_in = build_shorts_9_16_filter(None, None, [], layout="blur_bg", progress_bar=True, total_duration=dur)
+                    cmd = [
+                        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                        "-ss", f"{s:.2f}", "-i", video_path, "-t", f"{dur:.2f}",
+                        *extra_in, "-filter_complex", fg, "-map", "[vout]", "-map", "0:a?",
+                        *encoder_ffmpeg_args(enc, cfg_copy.video_quality),
+                        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_p,
+                    ]
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, creationflags=CREATE_NO_WINDOW)
+                    if r.returncode == 0 and os.path.exists(out_p):
+                        made += 1
+                        if send_tg:
+                            send_telegram_video_async(cfg_copy, out_p, f"🤖 Автопилот Shorts #{idx}: {c.get('title', ch.username)}")
+                self.done.emit(made > 0, f"Автопилот ({ch.username}): создано {made} Shorts в AutoPilot_Shorts/")
+
+        apw = _AutoPilotWorker(self)
+        apw.done.connect(lambda ok, msg: (
+            bridge._log(f"[Автопилот] {msg}"),
+            bridge._toast("Автопилот", msg, "success" if ok else "info"),
+            bridge._aux_workers.remove(apw) if apw in bridge._aux_workers else None,
+        ))
+        self._aux_workers.append(apw)
+        apw.start()
+
+    def _check_scheduled_posts(self) -> None:
+        from app.broadcast_suite import load_scheduled_posts, save_scheduled_posts
+        posts = load_scheduled_posts()
+        if not posts:
+            return
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        changed = False
+        for item in posts:
+            if item.get("status") == "scheduled" and str(item.get("publish_at") or "") <= now_str:
+                item["status"] = "published"
+                changed = True
+                self._log(f"[Контент-календарь] Запуск отложенной публикации: {item.get('title', '')}")
+                self.executeAutoPublish(json.dumps(item, ensure_ascii=False))
+        if changed:
+            save_scheduled_posts(posts)
+            self._emit("scheduled_posts", posts)
+
+    @Slot(result=str)
+    def getScheduledPosts(self) -> str:
+        from app.broadcast_suite import load_scheduled_posts
+        return json.dumps(load_scheduled_posts(), ensure_ascii=False)
+
+    @Slot(str, result=str)
+    def addScheduledPost(self, item_json: str) -> str:
+        from app.broadcast_suite import load_scheduled_posts, save_scheduled_posts
+        d = json.loads(item_json or "{}")
+        d["id"] = f"sp_{int(time.time() * 1000)}"
+        d["status"] = "scheduled"
+        posts = load_scheduled_posts()
+        posts.append(d)
+        posts.sort(key=lambda x: str(x.get("publish_at") or ""))
+        save_scheduled_posts(posts)
+        self._toast("Пост запланирован", f"{d.get('publish_at', '')} · {', '.join(d.get('platforms') or [])}", "success")
+        return json.dumps(posts, ensure_ascii=False)
+
+    @Slot(str, result=str)
+    def deleteScheduledPost(self, post_id: str) -> str:
+        from app.broadcast_suite import load_scheduled_posts, save_scheduled_posts
+        posts = [p for p in load_scheduled_posts() if p.get("id") != post_id]
+        save_scheduled_posts(posts)
+        return json.dumps(posts, ensure_ascii=False)
+
+    @Slot(str)
+    def repairVideoFile(self, path: str) -> None:
+        if not path or not os.path.exists(path):
+            self._toast("MP4 Doctor", "Файл не найден", "error")
+            return
+        self._toast("MP4 / MKV Doctor", f"Проверяем и чиним {Path(path).name}...", "info")
+        bridge = self
+
+        class _RepairWorker(QThread):
+            done = Signal(bool, str, str)
+
+            def run(self) -> None:
+                from app.broadcast_suite import diagnose_and_repair_video
+                ok, out, msg = diagnose_and_repair_video(path)
+                self.done.emit(ok, out, msg)
+
+        rw = _RepairWorker(self)
+        rw.done.connect(lambda ok, out, msg: (
+            bridge._log(f"[MP4 Doctor] {msg}"),
+            bridge._toast("MP4 / MKV Doctor", msg, "success" if ok else "error"),
+            bridge.scanLibrary() if ok else None,
+            bridge._aux_workers.remove(rw) if rw in bridge._aux_workers else None,
+        ))
+        self._aux_workers.append(rw)
+        rw.start()
+
+    @Slot(str, str)
+    def obsAction(self, action: str, arg: str = "") -> None:
+        cfg_copy = deepcopy(self.config)
+        bridge = self
+
+        class _OBSWorker(QThread):
+            done = Signal(bool, object, str)
+
+            def run(self) -> None:
+                from app.broadcast_suite import OBSWebSocketClient
+                cli = OBSWebSocketClient(cfg_copy.obs_ws_host, cfg_copy.obs_ws_port, cfg_copy.obs_ws_password)
+                if action == "status":
+                    ok, data, msg = cli.send_request("GetSceneList")
+                    self.done.emit(ok, data, msg)
+                elif action == "start_rec":
+                    ok, data, msg = cli.send_request("StartRecord")
+                    self.done.emit(ok, data, "OBS: Запись запущена" if ok else msg)
+                elif action == "stop_rec":
+                    ok, data, msg = cli.send_request("StopRecord")
+                    self.done.emit(ok, data, "OBS: Запись остановлена" if ok else msg)
+                elif action == "switch_scene":
+                    ok, data, msg = cli.send_request("SetCurrentProgramScene", {"sceneName": arg})
+                    self.done.emit(ok, data, f"OBS: Сцена «{arg}»" if ok else msg)
+                else:
+                    self.done.emit(False, {}, "Неизвестная команда OBS")
+
+        ow = _OBSWorker(self)
+        ow.done.connect(lambda ok, data, msg: (
+            bridge._toast("OBS Studio", msg, "success" if ok else "error"),
+            bridge._emit("obs_result", {"action": action, "ok": ok, "data": data, "message": msg}),
+            bridge._aux_workers.remove(ow) if ow in bridge._aux_workers else None,
+        ))
+        self._aux_workers.append(ow)
+        ow.start()
+
+    @Slot(result=str)
+    def getMobileRemoteInfo(self) -> str:
+        return json.dumps({
+            "running": self._mobile_remote.running,
+            "url": self._mobile_remote_url,
+            "port": self._mobile_remote.port,
+            "pin": self._mobile_remote.pin,
+        }, ensure_ascii=False)
+
+    @Slot(result=str)
+    def getWorkspaces(self) -> str:
+        from app.broadcast_suite import list_workspaces
+        active, names = list_workspaces()
+        self._active_workspace = active
+        return json.dumps({"active": active, "workspaces": names}, ensure_ascii=False)
+
+    @Slot(str, result=str)
+    def switchWorkspace(self, target_name: str) -> str:
+        from app.broadcast_suite import list_workspaces, switch_workspace_config
+        new_cfg = switch_workspace_config(self._active_workspace, target_name, self.config)
+        self.config = new_cfg
+        self._active_workspace, names = list_workspaces()
+        self._register_configured_media_files()
+        self._sync_telegram_bot()
+        self._sync_mobile_remote()
+        self._emit("config", asdict(self.config))
+        self._push_channels()
+        self._toast("Профиль переключён", f"Активный проект: {self._active_workspace}", "success")
+        return json.dumps({"active": self._active_workspace, "workspaces": names, "channels": self._serialize_channels()}, ensure_ascii=False)
+
+    @Slot(result=str)
+    def getAnalyticsData(self) -> str:
+        from app.broadcast_suite import compute_analytics_dashboard
+        return json.dumps(compute_analytics_dashboard(self.config.output_dir), ensure_ascii=False)
+
     def shutdown(self) -> None:
         if self._sleep_timer.isActive():
             self._sleep_timer.stop()
+        self.schedule_timer.stop()
+        self._mobile_remote.stop()
         self._sleep_inhibitor.release()
         self.monitor_timer.stop()
         self.queue_timer.stop()

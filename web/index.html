@@ -37,6 +37,11 @@
         </div>
       </div>
 
+      <div class="ws-switcher" title="Профиль проекта / клиента (свои каналы, папки и настройки)">
+        <select id="wsSelect" class="input-select compact"></select>
+        <button class="btn-icon" id="btnAddWs" title="Создать новый профиль проекта"><i data-icon="plus"></i></button>
+      </div>
+
       <button class="cmd-trigger" id="btnOpenCmd" title="Быстрый поиск команд (Ctrl+K / Cmd+K)">
         <span class="cmd-left"><i data-icon="search"></i><span>Быстрый поиск...</span></span>
         <kbd id="cmdShortcutKbd">Ctrl K</kbd>
@@ -48,6 +53,10 @@
           <span class="nav-ico"><i data-icon="radio"></i></span>
           <span class="nav-label">Прямые эфиры</span>
           <span class="nav-badge danger hidden" id="badgeRec">0</span>
+        </button>
+        <button class="nav-item" data-page="multiview">
+          <span class="nav-ico"><i data-icon="video"></i></span>
+          <span class="nav-label">Мультистрим</span>
         </button>
         <button class="nav-item" data-page="vod">
           <span class="nav-ico"><i data-icon="film"></i></span>
@@ -76,6 +85,10 @@
         </button>
 
         <div class="nav-group-label">СИСТЕМА</div>
+        <button class="nav-item" data-page="analytics">
+          <span class="nav-ico"><i data-icon="flame"></i></span>
+          <span class="nav-label">Аналитика</span>
+        </button>
         <button class="nav-item" data-page="settings">
           <span class="nav-ico"><i data-icon="sliders"></i></span>
           <span class="nav-label">Настройки</span>
@@ -136,6 +149,9 @@
       <!-- Page 1: LIVE STREAMS -->
       <section class="page active" id="page-live"></section>
 
+      <!-- Page 1b: MULTIVIEW WALL -->
+      <section class="page" id="page-multiview"></section>
+
       <!-- Page 2: VOD & CLIPS -->
       <section class="page" id="page-vod"></section>
 
@@ -150,6 +166,9 @@
 
       <!-- Page 5b: SOCIAL AUTO-POSTING -->
       <section class="page" id="page-publish"></section>
+
+      <!-- Page 5c: ANALYTICS DASHBOARD -->
+      <section class="page" id="page-analytics"></section>
 
       <!-- Page 6: SETTINGS -->
       <section class="page" id="page-settings"></section>

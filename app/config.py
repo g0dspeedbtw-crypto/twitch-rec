@@ -42,7 +42,7 @@ def get_data_dir() -> Path:
 
 BASE_DIR = get_resource_dir()
 DATA_DIR = get_data_dir()
-APP_VERSION = "3.2.2"
+APP_VERSION = "4.0.0"
 DEFAULT_GITHUB_REPO = "g0dspeedbtw-crypto/twitch-rec"
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -192,6 +192,9 @@ class ChannelConfig:
     auto_clip_threshold: int = 18       # hype messages per 10s bucket to trigger auto-clip
     chat_trigger_words: str = ""        # comma-separated keywords in chat that auto-drop a highlight marker
     separate_audio_track: bool = False  # automatically extract a clean .mp3/.wav audio track alongside video
+    autopilot_enabled: bool = False     # v4.0 Auto-pipeline after stream (Viral Clips -> Shorts -> TG)
+    autopilot_shorts_count: int = 3
+    autopilot_send_telegram: bool = True
 
     @property
     def blur_regions(self) -> List[BlurRegion]:
@@ -357,6 +360,20 @@ class AppConfig:
     youtube_client_secrets: str = ""
     vk_access_token: str = ""
     vk_group_id: str = ""
+    # v4.0 Broadcast & Autopilot Suite
+    vod_rate_limit_mbps: float = 0.0
+    cloud_upload_enabled: bool = False
+    cloud_upload_dir: str = ""
+    cloud_webdav_url: str = ""
+    cloud_webdav_user: str = ""
+    cloud_webdav_pass: str = ""
+    cloud_delete_local_after_upload: bool = False
+    obs_ws_host: str = "127.0.0.1"
+    obs_ws_port: int = 4455
+    obs_ws_password: str = ""
+    mobile_remote_enabled: bool = False
+    mobile_remote_port: int = 8765
+    mobile_remote_pin: str = "1234"
     # Chat Overlay & Watermark (#23, #32)
     chat_position: str = "right"   # "right" | "left"
     chat_font_size: int = 28

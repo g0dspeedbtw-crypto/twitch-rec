@@ -2098,3 +2098,58 @@ details.adv-group > summary:hover { background: rgba(255, 255, 255, 0.04); color
   background: linear-gradient(135deg, rgba(34, 197, 94, 0.11), rgba(139, 92, 246, 0.09));
   border: 1px solid rgba(34, 197, 94, 0.3);
 }
+
+/* ==================== v4.0 BROADCAST & AUTOPILOT SUITE ==================== */
+.ws-switcher {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ws-switcher select { flex: 1; font-size: 12px; }
+
+.multiview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+@media (max-width: 960px) { .multiview-grid { grid-template-columns: 1fr; } }
+.mv-tile {
+  background: #07080d;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.mv-tile.solo { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.35); }
+.mv-video-wrap { position: relative; aspect-ratio: 16 / 9; background: #030407; }
+.mv-video-wrap video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.mv-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 12px;
+  background: rgba(18, 21, 31, 0.96);
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.analytics-bars { display: flex; flex-direction: column; gap: 9px; margin-top: 10px; }
+.an-bar-row { display: flex; flex-direction: column; gap: 4px; }
+.an-bar-top { display: flex; justify-content: space-between; font-size: 12.5px; }
+.an-bar-track { height: 8px; border-radius: 99px; background: rgba(255, 255, 255, 0.06); overflow: hidden; }
+.an-bar-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, #8b5cf6, #38bdf8); }
+
+.monitor-sub-preview {
+  position: absolute;
+  left: 8%;
+  right: 8%;
+  text-align: center;
+  pointer-events: none;
+  font-family: var(--font-display);
+  font-weight: 900;
+  text-transform: uppercase;
+  text-shadow: 0 3px 10px rgba(0, 0, 0, 0.95), 0 0 3px #000;
+  z-index: 3;
+}

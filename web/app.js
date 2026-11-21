@@ -53,6 +53,14 @@
     speechSearchQuery: "",
     speechSearchHits: [],
     localAi: null,
+    multiviewSolo: "",
+    scheduledPosts: [],
+    analytics: null,
+    obsScenes: [],
+    mobileRemote: null,
+    workspaces: ["Основной"],
+    activeWorkspace: "Основной",
+    subPreview: { show: false, text: "ЭТО БЫЛ ЛУЧШИЙ КЛАТЧ! 🔥", size: 28, color: "#fde047", pos: "bottom" },
     pub: {
       videoPath: "",
       formatMode: "full", // "full" | "clip" | "vertical"
@@ -158,6 +166,13 @@
       }
       _studioLoadedSrc = "";
     }
+    if (state.page === "multiview" && page !== "multiview") {
+      document.querySelectorAll("#page-multiview video").forEach((v) => {
+        v.pause();
+        v.removeAttribute("src");
+        v.load();
+      });
+    }
     state.page = page;
     document.querySelectorAll(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
     document.querySelectorAll(".page").forEach((p) => p.classList.toggle("active", p.id === `page-${page}`));
@@ -167,11 +182,13 @@
 
   function renderCurrentPage() {
     if (state.page === "live") renderLivePage();
+    else if (state.page === "multiview") renderMultiviewPage();
     else if (state.page === "vod") renderVodPage();
     else if (state.page === "library") renderLibraryPage();
     else if (state.page === "blur") renderBlurPage();
     else if (state.page === "studio") renderStudioPage();
     else if (state.page === "publish") renderPublishPage();
+    else if (state.page === "analytics") renderAnalyticsPage();
     else if (state.page === "settings") renderSettingsPage();
     else if (state.page === "logs") renderLogsPage();
     updateNavBadges();
@@ -678,6 +695,7 @@
                 <button class="btn btn-soft btn-sm act-to-blur" data-path="${esc(f.path)}">${iconSvg("blur", 13)}<span>Блюр</span></button>
                 <button class="btn btn-subtle btn-sm act-to-studio" data-path="${esc(f.path)}">${iconSvg("scissors", 13)}<span>Монтаж</span></button>
                 <button class="btn-icon act-to-pub" data-path="${esc(f.path)}" title="Отправить в Автопостинг (YouTube / TikTok / Telegram)">${iconSvg("upload", 14)}</button>
+                <button class="btn-icon act-repair" data-path="${esc(f.path)}" title="MP4 / MKV Doctor: проверить и починить файл для монтажа">${iconSvg("refresh", 14)}</button>
                 <button class="btn-icon act-tg-pub" data-path="${esc(f.path)}" data-name="${esc(f.name)}" title="Быстро отправить в Telegram">${iconSvg("bell", 14)}</button>
                 <button class="btn-icon act-reveal" data-path="${esc(f.path)}" title="Показать в проводнике">${iconSvg("folder", 14)}</button>
                 <button class="btn-icon danger act-rm" data-path="${esc(f.path)}" data-name="${esc(f.name)}" title="Удалить">${iconSvg("trash", 14)}</button>
@@ -702,6 +720,9 @@
     });
     wrap.querySelectorAll(".act-to-pub").forEach((el) => {
       el.onclick = () => { state.pub.videoPath = el.dataset.path; switchPage("publish"); };
+    });
+    wrap.querySelectorAll(".act-repair").forEach((el) => {
+      el.onclick = () => callBackend("repairVideoFile", el.dataset.path);
     });
     wrap.querySelectorAll(".act-reveal").forEach((el) => {
       el.onclick = () => callBackend("openInExplorer", el.dataset.path);
@@ -1072,6 +1093,7 @@
             <div class="studio-monitor-screen">
               <video id="studioMonitor" src="${videoPlayUrl(state.studioFile, state.studioSeekOffset || 0)}" playsinline autoplay muted></video>
               <div class="monitor-shorts-guide hidden" id="monShortsGuide"><span>SHORTS 9:16</span></div>
+              <div class="monitor-sub-preview hidden" id="monSubPreview"></div>
               <div class="monitor-thumb-preview hidden" id="monThumbPreview">
                 <span class="monitor-thumb-pill" id="monThumbSub"></span>
                 <div class="monitor-thumb-head" id="monThumbHead"></div>
@@ -1287,6 +1309,18 @@
     if (!mon) return;
     mon.style.filter = state.studioSub === "effects" ? studioFxCssFilter() : "";
     $("#monShortsGuide")?.classList.toggle("hidden", state.studioSub !== "shorts");
+    const sp = $("#monSubPreview");
+    if (sp) {
+      const showSub = state.studioSub === "ai" && state.aiHubSub === "speech" && state.subPreview.show;
+      sp.classList.toggle("hidden", !showSub);
+      if (showSub) {
+        sp.textContent = state.subPreview.text || "";
+        sp.style.fontSize = `${state.subPreview.size || 28}px`;
+        sp.style.color = state.subPreview.color || "#fde047";
+        sp.style.top = state.subPreview.pos === "top" ? "10%" : (state.subPreview.pos === "middle" ? "44%" : "auto");
+        sp.style.bottom = state.subPreview.pos === "bottom" ? "10%" : "auto";
+      }
+    }
     const tp = $("#monThumbPreview");
     if (tp) {
       const showTh = state.studioSub === "thumbnail";
@@ -1661,6 +1695,18 @@
               <button class="btn btn-subtle btn-sm" id="btnBanShield">🛡 Ban-Word Shield</button>
               <button class="btn btn-soft btn-sm" id="btnAiDubEn">🌍 AI Дубляж → EN</button>
             </div>
+            <details class="adv-group" ${state.subPreview.show ? "open" : ""}>
+              <summary>Предпросмотр субтитров на мониторе</summary>
+              <div class="adv-body" style="padding-top:8px;display:flex;flex-direction:column;gap:8px;">
+                <label class="switch-inline"><input type="checkbox" id="subPrevOn" ${state.subPreview.show ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Показать субтитры поверх видео</span></label>
+                <input class="input" id="subPrevTxt" value="${esc(state.subPreview.text)}" placeholder="Пример текста субтитров..." />
+                <div class="form-grid-3" style="gap:6px;">
+                  <div class="field"><label>Размер</label><input type="number" class="input mono" id="subPrevSz" value="${state.subPreview.size}" min="16" max="54" /></div>
+                  <div class="field"><label>Цвет</label><input type="color" class="input" id="subPrevCol" value="${state.subPreview.color}" style="height:34px;padding:2px;" /></div>
+                  <div class="field"><label>Позиция</label><select class="input-select" id="subPrevPos"><option value="bottom" ${state.subPreview.pos === "bottom" ? "selected" : ""}>Снизу</option><option value="middle" ${state.subPreview.pos === "middle" ? "selected" : ""}>Центр</option><option value="top" ${state.subPreview.pos === "top" ? "selected" : ""}>Сверху</option></select></div>
+                </div>
+              </div>
+            </details>
             ${state.aiBanHits.length ? `
               <div class="hl-list" style="max-height:140px;">
                 ${state.aiBanHits.map((h) => `<div class="hl-row"><span class="mono act-bjump" data-ts="${h.t}" style="cursor:pointer;color:#f87171;font-weight:700;">${fmtDur(h.t)}</span><span>🛡 ${esc(h.word)}</span></div>`).join("")}
@@ -1727,6 +1773,11 @@
       });
       $("#btnBanShield")?.addEventListener("click", () => { callBackend("runAiSuiteTask", "ban_shield", JSON.stringify({ video_path: state.studioFile, banned_words: $("#aiBanned").value, model: $("#aiModel").value })); showToast("AI Ban-Word Shield", "Сканируем речь на бан-ворды...", "info"); });
       $("#btnAiDubEn")?.addEventListener("click", () => { callBackend("runStudioAction", JSON.stringify({ action: "ai_dub", title: "AI Дубляж (EN)", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_dub_en", ".mp4"), target_lang: "en" } })); });
+      $("#subPrevOn")?.addEventListener("change", (e) => { state.subPreview.show = e.target.checked; syncStudioMonitorOverlays(); });
+      $("#subPrevTxt")?.addEventListener("input", (e) => { state.subPreview.text = e.target.value; syncStudioMonitorOverlays(); });
+      $("#subPrevSz")?.addEventListener("input", (e) => { state.subPreview.size = Number(e.target.value) || 28; syncStudioMonitorOverlays(); });
+      $("#subPrevCol")?.addEventListener("input", (e) => { state.subPreview.color = e.target.value; syncStudioMonitorOverlays(); });
+      $("#subPrevPos")?.addEventListener("change", (e) => { state.subPreview.pos = e.target.value; syncStudioMonitorOverlays(); });
       host.querySelectorAll(".act-bjump").forEach((el) => { el.onclick = () => seekStudioMonitor(Number(el.dataset.ts) || 0, true); });
       $("#btnAiChapters")?.addEventListener("click", () => callBackend("runAiSuiteTask", "chapters", JSON.stringify({ video_path: state.studioFile })));
       $("#btnGenYtMeta")?.addEventListener("click", () => callBackend("generateYouTubeMeta", state.studioFile));
@@ -2081,6 +2132,28 @@
             </div>
           </div>
 
+          <div class="card">
+            <div class="input-row" style="justify-content:space-between;margin-bottom:8px;">
+              <strong style="font-size:13.5px;">📅 Контент-календарь (Отложенный постинг)</strong>
+            </div>
+            <div class="input-row" style="margin-bottom:10px;">
+              <input type="datetime-local" class="input mono" id="pubSchedAt" style="flex:1;" />
+              <button class="btn btn-soft btn-sm" id="btnPubAddSched">📅 Запланировать</button>
+            </div>
+            ${state.scheduledPosts.length ? `
+              <div class="hl-list">
+                ${state.scheduledPosts.map((sp) => `
+                  <div class="hl-row">
+                    <span class="mono" style="font-size:11.5px;color:var(--accent-light);">${esc(sp.publish_at)}</span>
+                    <span style="flex:1;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(sp.title)} (${esc((sp.platforms || []).join(", "))})</span>
+                    <span class="diag-pill ${sp.status === "published" ? "" : "off"}" style="font-size:10.5px;">${sp.status === "published" ? "Готово" : "Ждёт"}</span>
+                    <button class="btn-icon danger act-del-sp" data-id="${esc(sp.id)}">${iconSvg("trash", 13)}</button>
+                  </div>
+                `).join("")}
+              </div>
+            ` : `<div style="font-size:12px;color:var(--text-muted);">Нет запланированных публикаций — выберите дату выше и нажмите «Запланировать».</div>`}
+          </div>
+
           ${pub.results.length ? `
             <div class="card">
               <strong style="font-size:13.5px;display:block;margin-bottom:8px;">Результаты публикации</strong>
@@ -2210,6 +2283,192 @@
         vertical_layout: pub.verticalLayout,
       }));
     };
+
+    if (!state._schedLoaded) {
+      state._schedLoaded = true;
+      callBackend("getScheduledPosts").then((raw) => {
+        try { state.scheduledPosts = JSON.parse(raw || "[]"); if (state.page === "publish") renderPublishPage(); } catch {}
+      });
+    }
+    $("#btnPubAddSched").onclick = async () => {
+      syncPubInputs();
+      const dt = ($("#pubSchedAt")?.value || "").replace("T", " ").trim();
+      if (!pub.videoPath) return showToast("Календарь", "Выберите видеофайл", "error");
+      if (!dt) return showToast("Календарь", "Укажите дату и время публикации", "error");
+      const raw = await callBackend("addScheduledPost", JSON.stringify({
+        publish_at: dt,
+        video_path: pub.videoPath,
+        thumb_path: pub.thumbPath,
+        format_mode: pub.formatMode,
+        platforms: pub.platforms,
+        title: pub.title || pub.videoPath.split(/[\\/]/).pop(),
+        description: pub.description,
+        hashtags: pub.hashtags,
+        privacy: pub.privacy,
+        clip_start: parseSec(pub.clipStart) ?? 0,
+        clip_end: parseSec(pub.clipEnd) ?? 60,
+        vertical_layout: pub.verticalLayout,
+      }));
+      try { state.scheduledPosts = JSON.parse(raw || "[]"); renderPublishPage(); } catch {}
+    };
+    root.querySelectorAll(".act-del-sp").forEach((b) => {
+      b.onclick = async () => {
+        const raw = await callBackend("deleteScheduledPost", b.dataset.id);
+        try { state.scheduledPosts = JSON.parse(raw || "[]"); renderPublishPage(); } catch {}
+      };
+    });
+  }
+
+  // ==================== PAGE 1b: MULTIVIEW WALL (2-4 LIVE STREAMS) ====================
+  function renderMultiviewPage() {
+    const root = $("#page-multiview");
+    const online = state.channels.filter((c) => c.status?.is_live).slice(0, 4);
+    if (!state.multiviewSolo && online.length) state.multiviewSolo = online[0].key;
+
+    root.innerHTML = `
+      <div class="page-header">
+        <div>
+          <div class="page-title">Мультистрим-стена (Multiview)</div>
+          <div class="page-sub">До 4 прямых эфиров одновременно без рекламы Twitch · Клик по 🔊 включает соло-звук</div>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-subtle" id="btnMvRefresh">${iconSvg("refresh", 15)}<span>Обновить потоки</span></button>
+        </div>
+      </div>
+
+      ${online.length === 0 ? `
+        <div class="empty-state">
+          ${iconSvg("video", 40)}
+          <h3>Нет активных стримов онлайн</h3>
+          <p>Когда отслеживаемые стримеры выйдут в эфир, здесь автоматически появятся их живые плееры (до 4 одновременно).</p>
+        </div>
+      ` : `
+        <div class="multiview-grid">
+          ${online.map((ch) => {
+            const isSolo = state.multiviewSolo === ch.key;
+            const rec = !!ch.is_recording;
+            return `
+              <div class="mv-tile ${isSolo ? "solo" : ""}" data-key="${esc(ch.key)}">
+                <div class="mv-video-wrap">
+                  <video src="/media/stream?url=${encodeURIComponent(ch.stream_url)}&q=480p,720p,best&t=${Date.now()}" autoplay playsinline ${isSolo ? "" : "muted"} controls></video>
+                </div>
+                <div class="mv-bar">
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <strong>${esc(ch.username)}</strong>
+                    <span class="plat-tag plat-${esc(ch.platform)}">${esc(ch.platform)}</span>
+                  </div>
+                  <div class="input-row" style="gap:5px;">
+                    <button class="btn ${isSolo ? "btn-primary" : "btn-subtle"} btn-sm act-mv-solo" data-key="${esc(ch.key)}">${isSolo ? "🔊 Соло" : "🔇 Звук"}</button>
+                    ${rec
+                      ? `<button class="btn btn-subtle btn-sm act-mv-dvr" data-key="${esc(ch.key)}">✂ 60с</button>
+                         <button class="btn btn-soft btn-sm act-mv-mk" data-key="${esc(ch.key)}">🔖</button>
+                         <button class="btn btn-danger btn-sm act-mv-stop" data-key="${esc(ch.key)}">■</button>`
+                      : `<button class="btn btn-success btn-sm act-mv-rec" data-key="${esc(ch.key)}">● Запись</button>`}
+                  </div>
+                </div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      `}
+    `;
+
+    $("#btnMvRefresh").onclick = () => renderMultiviewPage();
+    root.querySelectorAll(".act-mv-solo").forEach((b) => {
+      b.onclick = () => {
+        state.multiviewSolo = b.dataset.key;
+        root.querySelectorAll(".mv-tile").forEach((t) => {
+          const isS = t.dataset.key === state.multiviewSolo;
+          t.classList.toggle("solo", isS);
+          const v = t.querySelector("video");
+          if (v) v.muted = !isS;
+          const btn = t.querySelector(".act-mv-solo");
+          if (btn) { btn.textContent = isS ? "🔊 Соло" : "🔇 Звук"; btn.className = `btn ${isS ? "btn-primary" : "btn-subtle"} btn-sm act-mv-solo`; }
+        });
+      };
+    });
+    root.querySelectorAll(".act-mv-rec").forEach((b) => { b.onclick = () => callBackend("startRecording", b.dataset.key); });
+    root.querySelectorAll(".act-mv-stop").forEach((b) => { b.onclick = () => callBackend("stopRecording", b.dataset.key); });
+    root.querySelectorAll(".act-mv-dvr").forEach((b) => { b.onclick = () => callBackend("clipLastSeconds", b.dataset.key, 60); });
+    root.querySelectorAll(".act-mv-mk").forEach((b) => { b.onclick = () => callBackend("dropMarker", b.dataset.key); });
+  }
+
+  // ==================== PAGE 5c: ANALYTICS DASHBOARD ====================
+  function renderAnalyticsPage() {
+    const root = $("#page-analytics");
+    if (!state.analytics) {
+      root.innerHTML = `<div class="page-header"><div><div class="page-title">Аналитика записей и стримов</div><div class="page-sub">Собираем статистику по вашей библиотеке...</div></div></div>`;
+      callBackend("getAnalyticsData").then((raw) => {
+        try { state.analytics = JSON.parse(raw || "{}"); if (state.page === "analytics") renderAnalyticsPage(); } catch {}
+      });
+      return;
+    }
+    const a = state.analytics;
+    const maxChH = Math.max(...(a.top_channels || []).map((x) => x.hours), 0.1);
+    const maxGmH = Math.max(...(a.top_games || []).map((x) => x.hours), 0.1);
+    const daily = a.daily || [];
+    const maxDayH = Math.max(...daily.map((x) => x.hours), 0.1);
+
+    root.innerHTML = `
+      <div class="page-header">
+        <div>
+          <div class="page-title">Аналитика записей и стримов</div>
+          <div class="page-sub">Статистика часов записи, объёма хранилища, топ стримеров, игр и активности по дням</div>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-subtle" id="btnAnRefresh">${iconSvg("refresh", 15)}<span>Обновить</span></button>
+        </div>
+      </div>
+
+      <div class="live-kpi-strip" style="grid-template-columns:repeat(4,minmax(0,1fr));">
+        <div class="kpi-card"><div><div class="kpi-label">Всего записано</div><div class="kpi-val">${a.total_hours || 0} ч</div></div><div class="kpi-icon live">${iconSvg("film", 18)}</div></div>
+        <div class="kpi-card"><div><div class="kpi-label">Видеофайлов</div><div class="kpi-val">${a.total_files || 0}</div></div><div class="kpi-icon">${iconSvg("grid", 18)}</div></div>
+        <div class="kpi-card"><div><div class="kpi-label">Объём на диске</div><div class="kpi-val">${a.total_gb || 0} ГБ</div></div><div class="kpi-icon">${iconSvg("folder", 18)}</div></div>
+        <div class="kpi-card"><div><div class="kpi-label">Маркеров / Чата</div><div class="kpi-val">${a.total_markers || 0} / ${(a.total_chat_msgs || 0).toLocaleString("ru-RU")}</div></div><div class="kpi-icon rec">${iconSvg("flame", 18)}</div></div>
+      </div>
+
+      <div class="form-grid-2" style="margin-bottom:14px;">
+        <div class="card">
+          <strong style="font-size:14px;">Топ стримеров (по часам записи)</strong>
+          <div class="analytics-bars">
+            ${(a.top_channels || []).length ? a.top_channels.map((c) => `
+              <div class="an-bar-row">
+                <div class="an-bar-top"><span>${esc(c.name)}</span><span class="mono" style="color:var(--text-muted);">${c.hours} ч · ${c.files} видео · ${c.gb} ГБ</span></div>
+                <div class="an-bar-track"><div class="an-bar-fill" style="width:${Math.min(100, (c.hours / maxChH) * 100)}%;"></div></div>
+              </div>
+            `).join("") : `<div style="color:var(--text-muted);font-size:12.5px;">Пока нет записанных стримов</div>`}
+          </div>
+        </div>
+        <div class="card">
+          <strong style="font-size:14px;">Топ категорий / игр</strong>
+          <div class="analytics-bars">
+            ${(a.top_games || []).length ? a.top_games.map((g) => `
+              <div class="an-bar-row">
+                <div class="an-bar-top"><span>${esc(g.name)}</span><span class="mono" style="color:var(--text-muted);">${g.hours} ч</span></div>
+                <div class="an-bar-track"><div class="an-bar-fill" style="width:${Math.min(100, (g.hours / maxGmH) * 100)}%;background:linear-gradient(90deg,#22c55e,#38bdf8);"></div></div>
+              </div>
+            `).join("") : `<div style="color:var(--text-muted);font-size:12.5px;">Игры появятся после записи прямых эфиров</div>`}
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <strong style="font-size:14px;display:block;margin-bottom:10px;">Активность записей по дням (часов)</strong>
+        ${daily.length ? `
+          <div style="display:flex;align-items:flex-end;gap:10px;height:130px;padding-top:10px;">
+            ${daily.map((d) => `
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;height:100%;justify-content:flex-end;">
+                <span class="mono" style="font-size:10.5px;color:var(--accent-light);">${d.hours}ч</span>
+                <div style="width:100%;max-width:42px;height:${Math.max(8, (d.hours / maxDayH) * 85)}%;border-radius:7px 7px 3px 3px;background:linear-gradient(180deg,#a78bfa,#6d28d9);"></div>
+                <span class="mono" style="font-size:10.5px;color:var(--text-muted);">${esc(d.day)}</span>
+              </div>
+            `).join("")}
+          </div>
+        ` : `<div style="color:var(--text-muted);font-size:12.5px;">Нет данных по дням</div>`}
+      </div>
+    `;
+
+    $("#btnAnRefresh").onclick = () => { state.analytics = null; renderAnalyticsPage(); };
   }
 
   // ==================== PAGE 6: SETTINGS ====================
@@ -2272,7 +2531,12 @@
             </select>
           </div>
           <div class="field"><label>Качество CQ/CRF (19 оптимум)</label><input type="number" class="input" id="cfgCq" value="${c.video_quality || 19}" /></div>
-          <div class="field"><label>Потоков загрузки VOD</label><input type="number" class="input" id="cfgVodFrag" value="${c.vod_concurrent_fragments || 4}" /></div>
+          <div class="field"><label>Потоков VOD / Лимит МБ/с</label>
+            <div class="input-row" style="gap:6px;">
+              <input type="number" class="input" id="cfgVodFrag" value="${c.vod_concurrent_fragments || 4}" min="1" max="16" title="Количество потоков загрузки VOD" />
+              <input type="number" class="input" id="cfgVodLimit" value="${c.vod_rate_limit_mbps || 0}" min="0" max="1000" step="1" title="Лимит скорости VOD в МБ/с (0 = без лимита)" placeholder="МБ/с" />
+            </div>
+          </div>
           <div class="field"><label>Лимит одноврем. блюров GPU</label><input type="number" class="input" id="cfgMaxBlurs" value="${c.max_concurrent_blurs || 1}" min="1" max="6" /></div>
         </div>
         <div class="setting-row">
@@ -2487,6 +2751,67 @@
             ${c.cloud_gist_id ? `<span class="mono" style="font-size:11px;color:var(--text-muted);">Gist ID: ${esc(c.cloud_gist_id)}</span>` : ""}
           </div>
         </div>
+        <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:14px;">
+          <div class="setting-row">
+            <div>
+              <div class="setting-row-title">☁️ Авто-выгрузка готовых записей в облако (Яндекс.Диск WebDAV / Nextcloud / NAS)</div>
+              <div class="setting-row-desc">После завершения записи автоматически копирует видео в облачную папку или на WebDAV-сервер</div>
+            </div>
+            <label class="switch-inline"><input type="checkbox" id="cfgCloudUpOn" ${c.cloud_upload_enabled ? "checked" : ""}/><span class="switch-track"></span></label>
+          </div>
+          <div class="form-grid-2" style="margin:8px 0;">
+            <div class="field">
+              <label>Локальная облачная папка (Яндекс.Диск / Google Drive / NAS)</label>
+              <div class="input-row">
+                <input class="input" id="cfgCloudUpDir" value="${esc(c.cloud_upload_dir || "")}" placeholder="/Volumes/NAS/Streams или C:\YandexDisk\Streams" />
+                <button class="btn btn-subtle btn-sm" id="btnPickCloudUpDir">${iconSvg("folder", 14)}</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>WebDAV URL (напр. https://webdav.yandex.ru/TwitchRec)</label>
+              <input class="input" id="cfgWebdavUrl" value="${esc(c.cloud_webdav_url || "")}" placeholder="https://webdav.yandex.ru/TwitchRec" />
+            </div>
+          </div>
+          <div class="form-grid-2" style="margin-bottom:8px;">
+            <div class="field"><label>WebDAV Логин</label><input class="input" id="cfgWebdavUser" value="${esc(c.cloud_webdav_user || "")}" placeholder="user@yandex.ru" /></div>
+            <div class="field"><label>WebDAV Пароль приложения</label><input type="password" class="input" id="cfgWebdavPass" value="${esc(c.cloud_webdav_pass || "")}" placeholder="Пароль приложения" /></div>
+          </div>
+          <label class="switch-inline"><input type="checkbox" id="cfgCloudDelLoc" ${c.cloud_delete_local_after ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12.5px;">Удалять локальный файл после успешной выгрузки в облако</span></label>
+        </div>
+
+        <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:14px;">
+          <div class="setting-row-title" style="margin-bottom:4px;">🎥 Интеграция с OBS Studio (WebSocket v5)</div>
+          <div class="setting-row-desc" style="margin-bottom:10px;">Управляйте сценами и записью OBS прямо из Twitch Recorder Pro (OBS → Сервис → Настройки сервера WebSocket)</div>
+          <div class="form-grid-3" style="margin-bottom:10px;">
+            <div class="field"><label>Хост OBS</label><input class="input mono" id="cfgObsHost" value="${esc(c.obs_ws_host || "127.0.0.1")}" /></div>
+            <div class="field"><label>Порт</label><input type="number" class="input mono" id="cfgObsPort" value="${c.obs_ws_port || 4455}" /></div>
+            <div class="field"><label>Пароль WebSocket</label><input type="password" class="input" id="cfgObsPass" value="${esc(c.obs_ws_password || "")}" placeholder="Если задан в OBS" /></div>
+          </div>
+          <div class="input-row" style="flex-wrap:wrap;gap:8px;">
+            <button class="btn btn-primary btn-sm" id="btnObsConnect">🔗 Проверить OBS и сцены</button>
+            <button class="btn btn-soft btn-sm" id="btnObsStart">⏺ Старт записи OBS</button>
+            <button class="btn btn-danger-ghost btn-sm" id="btnObsStop">⏹ Стоп записи OBS</button>
+            ${(state.obsScenes || []).length ? `
+              <select class="input-select compact" id="obsSceneSel">${state.obsScenes.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}</select>
+              <button class="btn btn-subtle btn-sm" id="btnObsSwitchScene">Переключить сцену</button>
+            ` : ""}
+          </div>
+        </div>
+
+        <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:14px;">
+          <div class="setting-row">
+            <div>
+              <div class="setting-row-title">📱 Веб-пульт с телефона по Wi-Fi (Mobile Remote)</div>
+              <div class="setting-row-desc">Запускайте/останавливайте запись, ставьте маркеры и сохраняйте DVR 60с с iPhone/Android в домашней сети</div>
+            </div>
+            <label class="switch-inline"><input type="checkbox" id="cfgMobOn" ${c.mobile_remote_enabled ? "checked" : ""}/><span class="switch-track"></span></label>
+          </div>
+          <div class="form-grid-2" style="margin-top:8px;">
+            <div class="field"><label>Порт Wi-Fi пульта</label><input type="number" class="input mono" id="cfgMobPort" value="${c.mobile_remote_port || 8765}" min="1024" max="65535" /></div>
+            <div class="field"><label>PIN-код доступа (опционально)</label><input class="input mono" id="cfgMobPin" value="${esc(c.mobile_remote_pin || "")}" placeholder="Напр. 1234" /></div>
+          </div>
+          <div id="mobRemoteUrl" style="margin-top:8px;font-size:12.5px;color:var(--accent-light);"></div>
+        </div>
       </div>
 
       <div class="card ${state.settingsSub === "system" ? "" : "hidden"}">
@@ -2518,6 +2843,7 @@
       default_segment_minutes: Math.max(0, Number($("#cfgDefSeg")?.value) || 0),
       check_interval_sec: Math.max(10, Number($("#cfgInterval").value) || 30),
       vod_concurrent_fragments: Math.max(1, Number($("#cfgVodFrag").value) || 4),
+      vod_rate_limit_mbps: Math.max(0, Number($("#cfgVodLimit")?.value) || 0),
       min_free_gb: Math.max(1, Number($("#cfgMinGb").value) || 15),
       smart_segment_blur: $("#cfgSmartBlur").checked,
       hard_disk_guard: $("#cfgDiskGuard").checked,
@@ -2566,6 +2892,18 @@
       marker_hotkey: $("#cfgHotkey").value,
       cloud_sync_path: $("#cfgCloudPath")?.value.trim() || "",
       cloud_gist_token: $("#cfgGistTok")?.value.trim() || "",
+      cloud_upload_enabled: $("#cfgCloudUpOn")?.checked || false,
+      cloud_upload_dir: $("#cfgCloudUpDir")?.value.trim() || "",
+      cloud_webdav_url: $("#cfgWebdavUrl")?.value.trim() || "",
+      cloud_webdav_user: $("#cfgWebdavUser")?.value.trim() || "",
+      cloud_webdav_pass: $("#cfgWebdavPass")?.value || "",
+      cloud_delete_local_after: $("#cfgCloudDelLoc")?.checked || false,
+      obs_ws_host: $("#cfgObsHost")?.value.trim() || "127.0.0.1",
+      obs_ws_port: Math.max(1, Number($("#cfgObsPort")?.value) || 4455),
+      obs_ws_password: $("#cfgObsPass")?.value || "",
+      mobile_remote_enabled: $("#cfgMobOn")?.checked || false,
+      mobile_remote_port: Math.max(1024, Number($("#cfgMobPort")?.value) || 8765),
+      mobile_remote_pin: $("#cfgMobPin")?.value.trim() || "",
       github_repo: $("#cfgGhRepo").value.trim(),
       auto_check_updates: $("#cfgAutoUpd").checked,
     });
@@ -2580,6 +2918,37 @@
         $("#cfgCloudPath").value = folder;
         state.settingsDraft.cloud_sync_path = folder;
       }
+    });
+    $("#btnPickCloudUpDir")?.addEventListener("click", async () => {
+      const folder = await callBackend("pickFolder");
+      if (folder && $("#cfgCloudUpDir")) {
+        $("#cfgCloudUpDir").value = folder;
+        state.settingsDraft.cloud_upload_dir = folder;
+      }
+    });
+    const saveAndObs = async (action, arg = "") => {
+      const data = collectSettings();
+      state.settingsDraft = { ...data };
+      await callBackend("saveSettings", JSON.stringify(data));
+      await callBackend("obsAction", action, arg);
+    };
+    $("#btnObsConnect")?.addEventListener("click", () => saveAndObs("status"));
+    $("#btnObsStart")?.addEventListener("click", () => saveAndObs("start_record"));
+    $("#btnObsStop")?.addEventListener("click", () => saveAndObs("stop_record"));
+    $("#btnObsSwitchScene")?.addEventListener("click", () => {
+      const sc = $("#obsSceneSel")?.value || "";
+      if (sc) saveAndObs("set_scene", sc);
+    });
+    callBackend("getMobileRemoteInfo").then((raw) => {
+      try {
+        const info = JSON.parse(raw || "{}");
+        const box = $("#mobRemoteUrl");
+        if (box) {
+          box.innerHTML = info.running
+            ? `✅ Пульт запущен! Откройте в браузере телефона: <strong class="mono">${esc(info.url)}</strong>${info.pin_required ? " (защищён PIN)" : ""}`
+            : `Включите переключатель выше и нажмите «Сохранить настройки» — адрес появится здесь (${esc(info.url || "")})`;
+        }
+      } catch {}
     });
     $("#btnCloudPush")?.addEventListener("click", async () => {
       const data = collectSettings();
@@ -3231,6 +3600,25 @@
         </div>
       </details>
 
+      <details class="adv-group" ${ch.autopilot_enabled ? "open" : ""}>
+        <summary>🤖 Автопилот после завершения эфира</summary>
+        <div class="adv-body" style="padding-top:10px;display:flex;flex-direction:column;gap:8px;">
+          <div class="setting-row">
+            <div>
+              <div class="setting-row-title">Включить Автопилот после стрима</div>
+              <div class="setting-row-desc">Автоматически найдёт лучшие моменты, нарежет Shorts 9:16 и отправит в Telegram</div>
+            </div>
+            <label class="switch-inline"><input type="checkbox" id="cdAutoPilot" ${ch.autopilot_enabled ? "checked" : ""}/><span class="switch-track"></span></label>
+          </div>
+          <div class="form-grid-2">
+            <div class="field"><label>Кол-во Shorts (1–10)</label><input type="number" class="input mono" id="cdApCount" value="${ch.autopilot_shorts_count || 3}" min="1" max="10" /></div>
+            <div class="field" style="justify-content:flex-end;">
+              <label class="switch-inline" style="margin-top:18px;"><input type="checkbox" id="cdApTg" ${ch.autopilot_send_telegram !== false ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Отправлять в Telegram</span></label>
+            </div>
+          </div>
+        </div>
+      </details>
+
       <details class="adv-group" ${ch.schedule_enabled || ch.category_filter || ch.title_filter ? "open" : ""}>
         <summary>Фильтры игр и Расписание записи</summary>
         <div class="adv-body" style="padding-top:10px;display:flex;flex-direction:column;gap:10px;">
@@ -3284,6 +3672,9 @@
         schedule_start: $("#cdSStart").value.trim() || "00:00",
         schedule_end: $("#cdSEnd").value.trim() || "23:59",
         schedule_days: days,
+        autopilot_enabled: $("#cdAutoPilot")?.checked || false,
+        autopilot_shorts_count: Math.max(1, Math.min(10, Number($("#cdApCount")?.value) || 3)),
+        autopilot_send_telegram: $("#cdApTg")?.checked ?? true,
       }));
       if (raw) {
         try {
@@ -3474,10 +3865,13 @@
     const q = query.trim().toLowerCase();
     const cmds = [
       { label: "Открыть: Прямые эфиры", sub: "Страница", run: () => switchPage("live") },
+      { label: "Открыть: Мультивью (2×2)", sub: "Страница", run: () => switchPage("multiview") },
       { label: "Открыть: VOD и Клипы", sub: "Страница", run: () => switchPage("vod") },
       { label: "Открыть: Библиотека записей", sub: "Страница", run: () => switchPage("library") },
       { label: "Открыть: Блюр и Очередь GPU", sub: "Страница", run: () => switchPage("blur") },
       { label: "Открыть: Монтаж и AI-студия", sub: "Страница", run: () => switchPage("studio") },
+      { label: "Открыть: Автопостинг и Календарь", sub: "Страница", run: () => switchPage("publish") },
+      { label: "Открыть: Аналитика и Графики", sub: "Страница", run: () => switchPage("analytics") },
       { label: "Открыть: Настройки", sub: "Страница", run: () => switchPage("settings") },
       { label: "Проверить статусы всех каналов", sub: "Действие", run: () => callBackend("checkChannels") },
       { label: "Записать всех онлайн", sub: "Действие", run: () => callBackend("recordAllOnline") },
@@ -3701,6 +4095,14 @@
     } else if (type === "publish_result") {
       state.pub.results = data?.results || [];
       if (state.page === "publish") renderPublishPage();
+    } else if (type === "scheduled_posts") {
+      state.scheduledPosts = data || [];
+      if (state.page === "publish") renderPublishPage();
+    } else if (type === "obs_result") {
+      if (data?.action === "status" && data.ok) {
+        state.obsScenes = (data.data?.scenes || []).map((s) => s.sceneName || s);
+        if (state.page === "settings") renderSettingsPage();
+      }
     } else if (type === "catalog") {
       state.catalogLoading = false;
       state.catalogError = data.error || "";
@@ -3852,6 +4254,35 @@
         applyDiagnosticsUi();
         renderUpdateBanner();
         renderCurrentPage();
+        const refreshWorkspaces = async () => {
+          try {
+            const wsData = JSON.parse((await callBackend("getWorkspaces")) || "{}");
+            const sel = $("#wsSelect");
+            if (sel && Array.isArray(wsData.workspaces)) {
+              sel.innerHTML = wsData.workspaces.map((w) => `<option value="${esc(w)}" ${w === wsData.active ? "selected" : ""}>${esc(w)}</option>`).join("");
+            }
+          } catch {}
+        };
+        const applyWorkspaceSwitch = async (name) => {
+          if (!name) return;
+          const ok = await callBackend("switchWorkspace", name);
+          if (ok) {
+            const b2 = JSON.parse((await callBackend("getBootstrap")) || "{}");
+            state.config = b2.config || {};
+            state.channels = b2.channels || [];
+            state.settingsDraft = null;
+            applyTheme(state.config.theme);
+            await refreshWorkspaces();
+            renderCurrentPage();
+            if (state.channels.length > 0) callBackend("checkChannels");
+          }
+        };
+        $("#wsSelect")?.addEventListener("change", (e) => applyWorkspaceSwitch(e.target.value));
+        $("#btnAddWs")?.addEventListener("click", () => {
+          const name = window.prompt("Название нового профиля проекта (например: Клиент1, Игры, Основной):", "");
+          if (name && name.trim()) applyWorkspaceSwitch(name.trim());
+        });
+        await refreshWorkspaces();
         if (state.channels.length > 0) {
           callBackend("checkChannels");
         }

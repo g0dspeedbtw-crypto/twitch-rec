@@ -691,6 +691,8 @@ class VodDownloadWorker(QThread):
             cmd.extend(["--ffmpeg-location", str(Path(ffmpeg).parent)])
         if self.app_config.proxy_url.strip():
             cmd.extend(["--proxy", self.app_config.proxy_url.strip()])
+        if getattr(self.app_config, "vod_rate_limit_mbps", 0.0) and float(self.app_config.vod_rate_limit_mbps) > 0:
+            cmd.extend(["--limit-rate", f"{float(self.app_config.vod_rate_limit_mbps):.1f}M"])
         if self.app_config.twitch_oauth_token.strip():
             tok = self.app_config.twitch_oauth_token.strip()
             tok = tok[6:] if tok.lower().startswith("oauth:") else tok
