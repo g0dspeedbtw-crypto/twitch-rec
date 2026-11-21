@@ -1695,6 +1695,13 @@
               <button class="btn btn-subtle btn-sm" id="btnBanShield">🛡 Ban-Word Shield</button>
               <button class="btn btn-soft btn-sm" id="btnAiDubEn">🌍 AI Дубляж → EN</button>
             </div>
+            <div class="input-row" style="gap:6px;margin-top:6px;">
+              <select class="input-select compact" id="dmcaModeSel" style="flex:1;">
+                <option value="vocal_smart">🛡️ DMCA: Убрать музыку (голос остаётся)</option>
+                <option value="shazam_smart">🎵 DMCA: Shazam-сканер треков</option>
+              </select>
+              <button class="btn btn-primary btn-sm" id="btnRunDmca">Очистить</button>
+            </div>
             <details class="adv-group" ${state.subPreview.show ? "open" : ""}>
               <summary>Предпросмотр субтитров на мониторе</summary>
               <div class="adv-body" style="padding-top:8px;display:flex;flex-direction:column;gap:8px;">
@@ -1773,6 +1780,7 @@
       });
       $("#btnBanShield")?.addEventListener("click", () => { callBackend("runAiSuiteTask", "ban_shield", JSON.stringify({ video_path: state.studioFile, banned_words: $("#aiBanned").value, model: $("#aiModel").value })); showToast("AI Ban-Word Shield", "Сканируем речь на бан-ворды...", "info"); });
       $("#btnAiDubEn")?.addEventListener("click", () => { callBackend("runStudioAction", JSON.stringify({ action: "ai_dub", title: "AI Дубляж (EN)", subtitle: fname, params: { input_path: state.studioFile, output_path: appendFileSuffix(state.studioFile, "_dub_en", ".mp4"), target_lang: "en" } })); });
+      $("#btnRunDmca")?.addEventListener("click", () => { callBackend("runDmcaClean", state.studioFile, $("#dmcaModeSel")?.value || "vocal_smart"); });
       $("#subPrevOn")?.addEventListener("change", (e) => { state.subPreview.show = e.target.checked; syncStudioMonitorOverlays(); });
       $("#subPrevTxt")?.addEventListener("input", (e) => { state.subPreview.text = e.target.value; syncStudioMonitorOverlays(); });
       $("#subPrevSz")?.addEventListener("input", (e) => { state.subPreview.size = Number(e.target.value) || 28; syncStudioMonitorOverlays(); });
@@ -3601,19 +3609,51 @@
       </details>
 
       <details class="adv-group" ${ch.autopilot_enabled ? "open" : ""}>
-        <summary>🤖 Автопилот после завершения эфира</summary>
-        <div class="adv-body" style="padding-top:10px;display:flex;flex-direction:column;gap:8px;">
+        <summary>🤖 Полный автопилот (Запись по частям → DMCA → Обложка → YouTube)</summary>
+        <div class="adv-body" style="padding-top:10px;display:flex;flex-direction:column;gap:10px;">
           <div class="setting-row">
             <div>
-              <div class="setting-row-title">Включить Автопилот после стрима</div>
-              <div class="setting-row-desc">Автоматически найдёт лучшие моменты, нарежет Shorts 9:16 и отправит в Telegram</div>
+              <div class="setting-row-title">Включить полный автопилот</div>
+              <div class="setting-row-desc">Автоматически чистит музыку (DMCA), делает обложку + SEO и заливает на YouTube</div>
             </div>
             <label class="switch-inline"><input type="checkbox" id="cdAutoPilot" ${ch.autopilot_enabled ? "checked" : ""}/><span class="switch-track"></span></label>
           </div>
+          <div class="setting-row">
+            <div>
+              <div class="setting-row-title">Потоковая выгрузка по частям во время стрима</div>
+              <div class="setting-row-desc">Пока записывается 2-й час стрима, 1-й час уже очищается и загружается на YouTube</div>
+            </div>
+            <label class="switch-inline"><input type="checkbox" id="cdApPerSeg" ${ch.autopilot_per_segment !== false ? "checked" : ""}/><span class="switch-track"></span></label>
+          </div>
+          <div class="field">
+            <label>🛡️ DMCA Music Shield (защита от авторских прав)</label>
+            <select class="input-select" id="cdApDmca">
+              <option value="vocal_smart" ${(ch.autopilot_dmca_mode || "vocal_smart") === "vocal_smart" ? "selected" : ""}>Умное удаление музыки (голос стримера остаётся, без перекодирования видео)</option>
+              <option value="shazam_smart" ${ch.autopilot_dmca_mode === "shazam_smart" ? "selected" : ""}>Точечный Shazam-сканер (глушит только найденные треки)</option>
+              <option value="off" ${ch.autopilot_dmca_mode === "off" ? "selected" : ""}>Выкл (оставить оригинальный звук)</option>
+            </select>
+          </div>
           <div class="form-grid-2">
-            <div class="field"><label>Кол-во Shorts (1–10)</label><input type="number" class="input mono" id="cdApCount" value="${ch.autopilot_shorts_count || 3}" min="1" max="10" /></div>
+            <div class="field">
+              <label>Доступ на YouTube</label>
+              <select class="input-select" id="cdApYtPriv">
+                <option value="unlisted" ${(ch.autopilot_youtube_privacy || "unlisted") === "unlisted" ? "selected" : ""}>По ссылке (Unlisted — безопасно)</option>
+                <option value="public" ${ch.autopilot_youtube_privacy === "public" ? "selected" : ""}>Открытый сразу (Public)</option>
+                <option value="private" ${ch.autopilot_youtube_privacy === "private" ? "selected" : ""}>Приватный (Private)</option>
+              </select>
+            </div>
+            <div class="field" style="justify-content:flex-end;gap:6px;">
+              <label class="switch-inline"><input type="checkbox" id="cdApThumb" ${ch.autopilot_auto_thumb !== false ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Авто-обложка 1280×720</span></label>
+              <label class="switch-inline"><input type="checkbox" id="cdApYt" ${ch.autopilot_youtube_upload !== false ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Авто-загрузка на YouTube</span></label>
+            </div>
+          </div>
+          <div class="form-grid-2">
+            <div class="field">
+              <label class="switch-inline"><input type="checkbox" id="cdApShorts" ${ch.autopilot_make_shorts ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Нарезать Shorts 9:16</span></label>
+              <input type="number" class="input mono" id="cdApCount" value="${ch.autopilot_shorts_count || 3}" min="1" max="10" style="margin-top:4px;" title="Кол-во Shorts с части" />
+            </div>
             <div class="field" style="justify-content:flex-end;">
-              <label class="switch-inline" style="margin-top:18px;"><input type="checkbox" id="cdApTg" ${ch.autopilot_send_telegram !== false ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Отправлять в Telegram</span></label>
+              <label class="switch-inline"><input type="checkbox" id="cdApTg" ${ch.autopilot_send_telegram !== false ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Отчёт и ссылка в Telegram</span></label>
             </div>
           </div>
         </div>
@@ -3654,6 +3694,13 @@
     $("#chDrawerSave").onclick = async () => {
       if (!drawerChKey) return;
       const days = [...$("#cdDays").querySelectorAll(".day-pill.active")].map((b) => Number(b.dataset.day));
+      const apOn = $("#cdAutoPilot")?.checked || false;
+      const apPerSeg = $("#cdApPerSeg")?.checked ?? true;
+      let segMins = Number($("#cdSeg").value) || 0;
+      if (apOn && apPerSeg && segMins === 0) {
+        segMins = 60;
+        showToast("Потоковый автопилот", "Автоматически включена разбивка по 60 мин (1 час)", "info");
+      }
       const raw = await callBackend("updateChannelField", drawerChKey, JSON.stringify({
         auto_reconnect: $("#cdReconn").checked,
         auto_concat_parts: $("#cdConcat").checked,
@@ -3665,14 +3712,20 @@
         live_auto_clip: $("#cdAutoClip").checked,
         auto_clip_threshold: Math.max(5, Number($("#cdClipThr").value) || 18),
         chat_trigger_words: $("#cdTrigWords").value.trim(),
-        segment_minutes: Number($("#cdSeg").value) || 0,
+        segment_minutes: segMins,
         category_filter: $("#cdCat").value.trim(),
         title_filter: $("#cdTitle").value.trim(),
         schedule_enabled: $("#cdSched").checked,
         schedule_start: $("#cdSStart").value.trim() || "00:00",
         schedule_end: $("#cdSEnd").value.trim() || "23:59",
         schedule_days: days,
-        autopilot_enabled: $("#cdAutoPilot")?.checked || false,
+        autopilot_enabled: apOn,
+        autopilot_per_segment: apPerSeg,
+        autopilot_dmca_mode: $("#cdApDmca")?.value || "vocal_smart",
+        autopilot_auto_thumb: $("#cdApThumb")?.checked ?? true,
+        autopilot_youtube_upload: $("#cdApYt")?.checked ?? true,
+        autopilot_youtube_privacy: $("#cdApYtPriv")?.value || "unlisted",
+        autopilot_make_shorts: $("#cdApShorts")?.checked || false,
         autopilot_shorts_count: Math.max(1, Math.min(10, Number($("#cdApCount")?.value) || 3)),
         autopilot_send_telegram: $("#cdApTg")?.checked ?? true,
       }));

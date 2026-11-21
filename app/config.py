@@ -42,7 +42,7 @@ def get_data_dir() -> Path:
 
 BASE_DIR = get_resource_dir()
 DATA_DIR = get_data_dir()
-APP_VERSION = "4.0.0"
+APP_VERSION = "4.1.0"
 DEFAULT_GITHUB_REPO = "g0dspeedbtw-crypto/twitch-rec"
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -192,7 +192,13 @@ class ChannelConfig:
     auto_clip_threshold: int = 18       # hype messages per 10s bucket to trigger auto-clip
     chat_trigger_words: str = ""        # comma-separated keywords in chat that auto-drop a highlight marker
     separate_audio_track: bool = False  # automatically extract a clean .mp3/.wav audio track alongside video
-    autopilot_enabled: bool = False     # v4.0 Auto-pipeline after stream (Viral Clips -> Shorts -> TG)
+    autopilot_enabled: bool = False             # Full Auto-pipeline (Record -> DMCA -> Thumb/SEO -> YouTube)
+    autopilot_per_segment: bool = True          # Stream-process each finished segment (e.g. 1h) while next hour records
+    autopilot_dmca_mode: str = "vocal_smart"    # "off" | "vocal_smart" | "shazam_smart"
+    autopilot_auto_thumb: bool = True           # Auto-generate 1280x720 thumbnail from best frame
+    autopilot_youtube_upload: bool = True       # Auto-upload finished part/stream to YouTube
+    autopilot_youtube_privacy: str = "unlisted" # "unlisted" | "private" | "public"
+    autopilot_make_shorts: bool = False         # Also cut viral Shorts 9:16 from each part
     autopilot_shorts_count: int = 3
     autopilot_send_telegram: bool = True
 
@@ -523,6 +529,15 @@ class AppConfig:
                     auto_clip_threshold=max(5, int(ch_raw.get("auto_clip_threshold", 18))),
                     chat_trigger_words=str(ch_raw.get("chat_trigger_words", "")),
                     separate_audio_track=bool(ch_raw.get("separate_audio_track", False)),
+                    autopilot_enabled=bool(ch_raw.get("autopilot_enabled", False)),
+                    autopilot_per_segment=bool(ch_raw.get("autopilot_per_segment", True)),
+                    autopilot_dmca_mode=str(ch_raw.get("autopilot_dmca_mode", "vocal_smart")),
+                    autopilot_auto_thumb=bool(ch_raw.get("autopilot_auto_thumb", True)),
+                    autopilot_youtube_upload=bool(ch_raw.get("autopilot_youtube_upload", True)),
+                    autopilot_youtube_privacy=str(ch_raw.get("autopilot_youtube_privacy", "unlisted")),
+                    autopilot_make_shorts=bool(ch_raw.get("autopilot_make_shorts", False)),
+                    autopilot_shorts_count=max(1, min(10, int(ch_raw.get("autopilot_shorts_count", 3)))),
+                    autopilot_send_telegram=bool(ch_raw.get("autopilot_send_telegram", True)),
                 )
             )
 
@@ -587,6 +602,26 @@ class AppConfig:
             cloud_sync_path=str(raw.get("cloud_sync_path", "")),
             cloud_gist_token=str(raw.get("cloud_gist_token", "")),
             cloud_gist_id=str(raw.get("cloud_gist_id", "")),
+            default_segment_minutes=max(0, int(raw.get("default_segment_minutes", 0))),
+            ai_brand_voice=str(raw.get("ai_brand_voice", "")),
+            youtube_client_secrets=str(raw.get("youtube_client_secrets", "")),
+            vk_access_token=str(raw.get("vk_access_token", "")),
+            vk_group_id=str(raw.get("vk_group_id", "")),
+            prevent_sleep_while_recording=bool(raw.get("prevent_sleep_while_recording", True)),
+            auto_sleep_after_finish=bool(raw.get("auto_sleep_after_finish", False)),
+            vod_rate_limit_mbps=max(0, int(raw.get("vod_rate_limit_mbps", 0))),
+            cloud_upload_enabled=bool(raw.get("cloud_upload_enabled", False)),
+            cloud_upload_dir=str(raw.get("cloud_upload_dir", "")),
+            cloud_webdav_url=str(raw.get("cloud_webdav_url", "")),
+            cloud_webdav_user=str(raw.get("cloud_webdav_user", "")),
+            cloud_webdav_pass=str(raw.get("cloud_webdav_pass", "")),
+            cloud_delete_local_after=bool(raw.get("cloud_delete_local_after", False)),
+            obs_ws_host=str(raw.get("obs_ws_host", "127.0.0.1")),
+            obs_ws_port=max(1, int(raw.get("obs_ws_port", 4455))),
+            obs_ws_password=str(raw.get("obs_ws_password", "")),
+            mobile_remote_enabled=bool(raw.get("mobile_remote_enabled", False)),
+            mobile_remote_port=max(1024, int(raw.get("mobile_remote_port", 8765))),
+            mobile_remote_pin=str(raw.get("mobile_remote_pin", "")),
             channels=channels,
         )
         cfg.ensure_output_dir()

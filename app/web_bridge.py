@@ -748,7 +748,9 @@ class AppBridge(QObject):
             "schedule_enabled", "schedule_start", "schedule_end", "schedule_days",
             "auto_scene_by_game", "live_auto_clip", "auto_clip_threshold",
             "chat_trigger_words", "separate_audio_track",
-            "autopilot_enabled", "autopilot_shorts_count", "autopilot_send_telegram",
+            "autopilot_enabled", "autopilot_per_segment", "autopilot_dmca_mode",
+            "autopilot_auto_thumb", "autopilot_youtube_upload", "autopilot_youtube_privacy",
+            "autopilot_make_shorts", "autopilot_shorts_count", "autopilot_send_telegram",
         ):
             if field_name in patch:
                 setattr(ch, field_name, patch[field_name])
@@ -877,6 +879,7 @@ class AppBridge(QObject):
         w.progress_updated.connect(self._on_rec_progress)
         w.status_changed.connect(self._on_rec_status)
         w.log_message.connect(self._log)
+        w.segment_ready.connect(self._on_segment_ready)
         w.finished_recording.connect(self._on_rec_finished)
         self.live_recorders[key] = w
         w.start()
@@ -950,9 +953,31 @@ class AppBridge(QObject):
         t.update({"dur": dur, "size": size, "speed": speed})
         self._emit("rec_progress", {"key": key, **t})
 
+    @Slot(str, str, int, bool)
+    def _on_segment_ready(self, key: str, file_path: str, part_number: int, needs_post_blur: bool) -> None:
+        """Called LIVE while recording continues as soon as a timed segment (e.g. Hour 1) finishes."""
+        ch = self.config.get_channel(key)
+        if not ch:
+            return
+        if getattr(ch, "autopilot_enabled", False) and getattr(ch, "autopilot_per_segment", True):
+            self._log(f"[Автопилот] Часть #{part_number} ({Path(file_path).name}) отправлена в конвейер, пока пишется следующий час...")
+            self._toast("Потоковый автопилот", f"{ch.username} · Часть #{part_number} → обработка и YouTube", "info")
+            self._enqueue_autopilot_job(ch, file_path, part_number=part_number, needs_post_blur=needs_post_blur)
+        elif needs_post_blur and ch.blur_regions:
+            self._enqueue_blur_job(
+                file_path, ch.blur_regions,
+                delete_original=not ch.keep_original,
+                normalize_audio=self.config.normalize_audio_default,
+                force_now=False,
+            )
+        elif self.config.cloud_upload_enabled:
+            self._trigger_cloud_upload(file_path)
+
     @Slot(str, list, bool, bool)
     def _on_rec_finished(self, key: str, files: list, ok: bool, needs_post_blur: bool) -> None:
         w = self.live_recorders.pop(key, None)
+        already_emitted = set(getattr(w, "emitted_segments", set())) if w else set()
+        emitted_cnt = int(getattr(w, "_segment_part_counter", 0)) if w else 0
         if w:
             w.deleteLater()
         self.live_telemetry.pop(key, None)
@@ -962,15 +987,18 @@ class AppBridge(QObject):
             self._toast("Запись завершена", f"{ch.username if ch else key} · {Path(files[0]).name}", "success")
             if self.config.notify_on_finish:
                 send_notification_async(self.config, "Запись завершена", f"{ch.username if ch else key}: {Path(files[0]).name}", log_cb=self._log)
-            if needs_post_blur and ch and ch.blur_regions:
-                for fp in files:
+            remaining = [fp for fp in files if str(fp) not in already_emitted]
+            if ch and getattr(ch, "autopilot_enabled", False):
+                for idx, fp in enumerate(remaining):
+                    pnum = (emitted_cnt + idx + 1) if (ch.segment_minutes > 0 or emitted_cnt > 0 or len(files) > 1) else 0
+                    self._enqueue_autopilot_job(ch, fp, part_number=pnum, needs_post_blur=needs_post_blur)
+            elif needs_post_blur and ch and ch.blur_regions:
+                for fp in remaining:
                     self._enqueue_blur_job(fp, ch.blur_regions, delete_original=not ch.keep_original, normalize_audio=self.config.normalize_audio_default, force_now=False)
             else:
                 if self.config.cloud_upload_enabled:
-                    for fp in files:
+                    for fp in remaining:
                         self._trigger_cloud_upload(fp)
-                if ch and getattr(ch, "autopilot_enabled", False):
-                    self._trigger_channel_autopilot(ch, files[0])
         elif key not in self.manually_stopped:
             self._toast("Не удалось записать эфир", f"{ch.username if ch else key} — поток оффлайн или недоступен", "error")
 
@@ -2446,60 +2474,156 @@ class AppBridge(QObject):
         self._aux_workers.append(cw)
         cw.start()
 
-    def _trigger_channel_autopilot(self, ch: ChannelConfig, video_path: str) -> None:
-        """v4.0 Autopilot: after stream ends -> find top viral clips -> render Shorts 9:16 -> send to Telegram."""
-        cfg_copy = deepcopy(self.config)
-        count = max(1, min(6, int(getattr(ch, "autopilot_shorts_count", 3) or 3)))
-        send_tg = bool(getattr(ch, "autopilot_send_telegram", True))
-        bridge = self
-        self._log(f"[Автопилот] Запуск для {ch.username}: поиск топ-{count} вирусных клипов -> Shorts 9:16...")
+    def _enqueue_autopilot_job(
+        self,
+        ch: ChannelConfig,
+        video_path: str,
+        part_number: int = 0,
+        needs_post_blur: bool = False,
+    ) -> None:
+        """v4.1 Streaming Segment Autopilot: sequential queue (1 part at a time) so live recording stays 100% smooth."""
+        if not hasattr(self, "_autopilot_queue"):
+            self._autopilot_queue = []
+            self._autopilot_running = False
+        jid = uuid.uuid4().hex[:8]
+        part_lbl = f"Часть #{part_number}" if part_number > 0 else Path(video_path).name
+        st = self.statuses.get(ch.key)
+        self._register_job(jid, "studio", f"🤖 Автопилот: {ch.username} ({part_lbl})", "В очереди (Блюр → DMCA → Обложка → YouTube)", "queued")
+        self._autopilot_queue.append({
+            "jid": jid,
+            "channel": deepcopy(ch),
+            "config": deepcopy(self.config),
+            "video_path": video_path,
+            "part_number": part_number,
+            "needs_post_blur": needs_post_blur,
+            "stream_title": st.title if st else "",
+            "stream_game": st.game if st else "",
+        })
+        self._pump_autopilot_queue()
 
-        class _AutoPilotWorker(QThread):
+    def _pump_autopilot_queue(self) -> None:
+        if getattr(self, "_autopilot_running", False):
+            return
+        q = getattr(self, "_autopilot_queue", [])
+        if not q:
+            return
+        item = q.pop(0)
+        self._autopilot_running = True
+        jid = item["jid"]
+        ch: ChannelConfig = item["channel"]
+        cfg_copy: AppConfig = item["config"]
+        video_path: str = item["video_path"]
+        part_number: int = item["part_number"]
+        needs_post_blur: bool = item["needs_post_blur"]
+        bridge = self
+
+        class _FullAutoPilotWorker(QThread):
+            prog = Signal(int, str)
+            log_msg = Signal(str)
+            done = Signal(dict)
+
+            def run(self) -> None:
+                from app.autopilot_pipeline import run_full_autopilot_for_file
+                from app.tools import build_blur_filter_graph, encoder_ffmpeg_args, get_ffmpeg_path, resolve_encoder
+
+                def _blur_seg(in_p: str, out_p: str):
+                    ffmpeg = get_ffmpeg_path()
+                    if not ffmpeg or not ch.blur_regions:
+                        return False, "Нет зон блюра"
+                    fg, extra_in = build_blur_filter_graph(ch.blur_regions)
+                    if not fg:
+                        return False, "Пустой граф блюра"
+                    enc = resolve_encoder(cfg_copy.encoder)
+                    cmd = [
+                        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                        "-i", in_p, *extra_in,
+                        "-filter_complex", fg, "-map", "[vout]", "-map", "0:a?",
+                        *encoder_ffmpeg_args(enc, cfg_copy.video_quality),
+                        "-c:a", "copy", "-movflags", "+faststart", out_p,
+                    ]
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, creationflags=CREATE_NO_WINDOW)
+                    if r.returncode == 0 and os.path.exists(out_p) and os.path.getsize(out_p) > 10_000:
+                        return True, "OK"
+                    return False, (r.stderr or "Ошибка блюра")[-200:]
+
+                res = run_full_autopilot_for_file(
+                    video_path,
+                    ch,
+                    cfg_copy,
+                    part_number=part_number,
+                    stream_title=item["stream_title"],
+                    stream_game=item["stream_game"],
+                    needs_post_blur=needs_post_blur,
+                    blur_fn=_blur_seg if needs_post_blur else None,
+                    progress_cb=lambda p, t: self.prog.emit(p, t),
+                    log_cb=lambda m: self.log_msg.emit(m),
+                )
+                self.done.emit(res)
+
+        apw = _FullAutoPilotWorker(self)
+        apw.prog.connect(lambda p, t: bridge._update_job(jid, progress=p, status=t, state="running"))
+        apw.log_msg.connect(self._log)
+
+        def _on_done(res: dict) -> None:
+            ok = bool(res.get("ok"))
+            yt_url = res.get("youtube_url", "")
+            out_file = res.get("final_video", video_path)
+            status_txt = f"YouTube: {yt_url}" if yt_url else (res.get("dmca_msg") or "Готово")
+            bridge._update_job(jid, progress=100 if ok else 0, status=status_txt[:80], state="done" if ok else "error", output_path=out_file)
+            if ok:
+                bridge._toast(
+                    f"Автопилот {ch.username} готов",
+                    f"Загружено на YouTube: {yt_url}" if yt_url else f"Очищено от музыки + обложка: {Path(out_file).name}",
+                    "success",
+                )
+                if bridge.config.cloud_upload_enabled:
+                    bridge._trigger_cloud_upload(out_file)
+            else:
+                bridge._toast(f"Автопилот {ch.username}", res.get("error", "Ошибка"), "error")
+            if apw in bridge._aux_workers:
+                bridge._aux_workers.remove(apw)
+            bridge._autopilot_running = False
+            bridge._pump_autopilot_queue()
+
+        apw.done.connect(_on_done)
+        self._aux_workers.append(apw)
+        apw.start()
+
+    @Slot(str, str)
+    def runDmcaClean(self, video_path: str, mode: str = "vocal_smart") -> None:
+        """Manual 1-click DMCA Music Shield from Studio / Library."""
+        p = Path(video_path)
+        if not p.exists():
+            self._toast("DMCA Shield", "Видеофайл не найден", "error")
+            return
+        jid = uuid.uuid4().hex[:8]
+        out_path = str(p.with_name(p.stem + "_nodmca.mp4"))
+        self._register_job(jid, "studio", f"🛡️ DMCA Shield ({mode})", p.name, "running")
+        bridge = self
+
+        class _DmcaWorker(QThread):
+            prog = Signal(int, str)
             done = Signal(bool, str)
 
             def run(self) -> None:
-                from app.ai_suite import find_viral_clips
-                from app.services import send_telegram_video_async
-                from app.tools import build_shorts_9_16_filter, encoder_ffmpeg_args, get_ffmpeg_path, resolve_encoder
-                clips = find_viral_clips(video_path, "", cfg_copy, max_clips=count)
-                if not clips:
-                    self.done.emit(False, f"Автопилот ({ch.username}): вирусных пиков не найдено")
-                    return
-                ffmpeg = get_ffmpeg_path()
-                if not ffmpeg:
-                    self.done.emit(False, "FFmpeg не найден")
-                    return
-                enc = resolve_encoder(cfg_copy.encoder)
-                out_dir = Path(video_path).parent / "AutoPilot_Shorts"
-                out_dir.mkdir(parents=True, exist_ok=True)
-                made = 0
-                for idx, c in enumerate(clips, 1):
-                    s = max(0.0, float(c.get("start_sec", 0)))
-                    dur = max(10.0, float(c.get("end_sec", s + 35)) - s)
-                    out_p = str(out_dir / f"{Path(video_path).stem}_short{idx}.mp4")
-                    fg, extra_in = build_shorts_9_16_filter(None, None, [], layout="blur_bg", progress_bar=True, total_duration=dur)
-                    cmd = [
-                        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-                        "-ss", f"{s:.2f}", "-i", video_path, "-t", f"{dur:.2f}",
-                        *extra_in, "-filter_complex", fg, "-map", "[vout]", "-map", "0:a?",
-                        *encoder_ffmpeg_args(enc, cfg_copy.video_quality),
-                        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_p,
-                    ]
-                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, creationflags=CREATE_NO_WINDOW)
-                    if r.returncode == 0 and os.path.exists(out_p):
-                        made += 1
-                        if send_tg:
-                            send_telegram_video_async(cfg_copy, out_p, f"🤖 Автопилот Shorts #{idx}: {c.get('title', ch.username)}")
-                self.done.emit(made > 0, f"Автопилот ({ch.username}): создано {made} Shorts в AutoPilot_Shorts/")
+                from app.autopilot_pipeline import dmca_clean_audio
+                ok, msg, _ = dmca_clean_audio(video_path, out_path, mode=mode, progress_cb=lambda pct, txt: self.prog.emit(pct, txt))
+                self.done.emit(ok, msg)
 
-        apw = _AutoPilotWorker(self)
-        apw.done.connect(lambda ok, msg: (
-            bridge._log(f"[Автопилот] {msg}"),
-            bridge._toast("Автопилот", msg, "success" if ok else "info"),
-            bridge._aux_workers.remove(apw) if apw in bridge._aux_workers else None,
-        ))
-        self._aux_workers.append(apw)
-        apw.start()
+        dw = _DmcaWorker(self)
+        dw.prog.connect(lambda pct, txt: bridge._update_job(jid, progress=pct, status=txt, state="running"))
+
+        def _done(ok: bool, msg: str) -> None:
+            bridge._update_job(jid, progress=100 if ok else 0, status=msg[:80], state="done" if ok else "error", output_path=out_path if ok else "")
+            bridge._log(f"[DMCA Shield] {p.name}: {msg}")
+            bridge._toast("DMCA Music Shield", msg, "success" if ok else "error")
+            if dw in bridge._aux_workers:
+                bridge._aux_workers.remove(dw)
+            bridge.refreshLibrary()
+
+        dw.done.connect(_done)
+        self._aux_workers.append(dw)
+        dw.start()
 
     def _check_scheduled_posts(self) -> None:
         from app.broadcast_suite import load_scheduled_posts, save_scheduled_posts

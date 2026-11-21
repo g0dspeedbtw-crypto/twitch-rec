@@ -131,6 +131,7 @@ class LiveRecorderWorker(QThread):
     progress_updated = Signal(str, str, str, str)        # key, duration_str, size_str, speed_str
     status_changed = Signal(str, str)                    # key, status_text
     log_message = Signal(str)
+    segment_ready = Signal(str, str, int, bool)          # key, finished_segment_path, part_number, needs_post_blur
     finished_recording = Signal(str, list, bool, bool)   # key, recorded_files, success, needs_post_blur
 
     _TIME_RE = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
@@ -156,6 +157,8 @@ class LiveRecorderWorker(QThread):
         self._start_wall = time.time()
         self._markers: List[dict] = []
         self.recorded_files: List[str] = []
+        self.emitted_segments: set[str] = set()
+        self._segment_part_counter: int = 0
 
     def request_stop(self) -> None:
         self._stop_requested = True
@@ -560,8 +563,26 @@ class LiveRecorderWorker(QThread):
                                 extras.append(f"{int(round(float(fps_m.group(1))))}fps")
                             if br_m:
                                 extras.append(br_m.group(1).replace("bits/s", "bps"))
-                            # Sum size of current pass segment(s) only
-                            cur_files = _match_pass_files()
+                            # Sum size of current pass segment(s) only + detect completed segments live
+                            cur_files = sorted(_match_pass_files())
+                            if cur_files:
+                                self._current_active_file = cur_files[-1]
+                            if self.channel.segment_minutes > 0 and len(cur_files) >= 2:
+                                for seg_p in cur_files[:-1]:
+                                    seg_str = str(seg_p)
+                                    if seg_str not in self.emitted_segments:
+                                        try:
+                                            if seg_p.exists() and seg_p.stat().st_size > 10_000:
+                                                self.emitted_segments.add(seg_str)
+                                                self._segment_part_counter += 1
+                                                self.log_message.emit(
+                                                    f"[{uname}] Сегмент #{self._segment_part_counter} завершён ({seg_p.name}) — готов к фоновой обработке/загрузке."
+                                                )
+                                                self.segment_ready.emit(
+                                                    key, seg_str, self._segment_part_counter, needs_post_blur
+                                                )
+                                        except Exception:
+                                            pass
                             total_sz = sum(p.stat().st_size for p in cur_files if p.exists())
                             self.progress_updated.emit(key, dur_str, format_bytes(total_sz), " · ".join(extras))
                     else:
