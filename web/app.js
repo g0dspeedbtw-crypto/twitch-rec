@@ -4119,6 +4119,7 @@
 
   // ==================== TELEMETRY SPARKLINE ====================
   function updateTelemetry(snap) {
+    if (document.hidden) return;
     const val = snap.gpu_pct != null ? snap.gpu_pct : Math.round(snap.cpu_pct || 0);
     state.sparkHistory.push(Math.max(2, Math.min(100, val)));
     if (state.sparkHistory.length > 28) state.sparkHistory.shift();
@@ -4179,7 +4180,11 @@
 
     if (type === "channels") {
       state.channels = data || [];
-      if (state.page === "live") renderLivePage();
+      if (state.page === "live") {
+        const ae = document.activeElement;
+        const editingLive = ae && $("#page-live")?.contains(ae) && ["INPUT", "SELECT", "TEXTAREA"].includes(ae.tagName);
+        if (!editingLive) renderLivePage();
+      }
       updateNavBadges();
     } else if (type === "preview_updated") {
       state.previewBust[data.key] = data.ts;

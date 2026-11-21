@@ -194,7 +194,7 @@ def find_viral_clips(
     max_clips: int = 8,
 ) -> List[dict]:
     """Combine chat spikes, audio vocal/emotion bursts, and markers into scored viral clips (0..100)."""
-    from app.chat_and_ai import analyze_audio_peaks, analyze_chat_highlights, detect_audio_events
+    from app.chat_and_ai import analyze_chat_highlights, detect_audio_events, detect_loud_moments
 
     candidates: List[Tuple[float, float, str]] = []  # (ts, raw_score, source)
 
@@ -226,7 +226,7 @@ def find_viral_clips(
     # 4. General loud peaks fallback
     if len(candidates) < 3:
         try:
-            _, au_hls = analyze_audio_peaks(video_path)
+            _, au_hls = detect_loud_moments(video_path)
             for idx, h in enumerate(au_hls[:6]):
                 candidates.append((float(h.timestamp_sec), max(62.0, 82.0 - idx * 3.0), h.reason))
         except Exception:
@@ -1259,8 +1259,10 @@ def create_virtual_greenscreen_short(
 # ------------------------------------------------------------------ #21 AI Smart Scene Cut (BRB / Starting Soon)
 def detect_brb_and_loading_scenes(video_path: str) -> List[Tuple[float, float]]:
     """Detect static 'Starting Soon / BRB / Loading' screens and return KEEP segments."""
-    from app.tools import detect_active_segments
-    return detect_active_segments(video_path, silence_db=-36, min_silence_sec=4.0, remove_freeze=True, min_freeze_sec=6.0)
+    from app.tools import detect_active_segments_no_silence_afk
+    return detect_active_segments_no_silence_afk(
+        video_path, silence_db=-36.0, min_silence_sec=4.0, remove_freeze=True, min_freeze_sec=6.0
+    )
 
 
 # ------------------------------------------------------------------ #22 AI Social Post Generator (Telegram / VK / Discord)
