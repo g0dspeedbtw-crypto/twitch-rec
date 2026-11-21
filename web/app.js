@@ -948,6 +948,7 @@
     return Math.max(0, (state.studioSeekOffset || 0) + (mon ? (mon.currentTime || 0) : 0));
   }
 
+  let _studioSeekTimer = null;
   function seekStudioMonitor(targetSec, autoplay = true) {
     const mon = $("#studioMonitor");
     if (!mon || !state.studioFile) return;
@@ -959,10 +960,16 @@
     if (tc) tc.textContent = `${fmtDur(clamped)} / ${fmtDur(dur)}`;
     const ph = $("#tlPlayhead");
     if (ph && dur > 0) ph.style.left = `${Math.min(100, Math.max(0, (clamped / dur) * 100))}%`;
-    mon.src = videoPlayUrl(state.studioFile, clamped);
-    mon.playbackRate = state.studioSpeed || 1;
-    mon.load();
-    if (autoplay) mon.play().catch(() => {});
+    if (_studioSeekTimer) clearTimeout(_studioSeekTimer);
+    _studioSeekTimer = setTimeout(() => {
+      _studioSeekTimer = null;
+      const m2 = $("#studioMonitor");
+      if (!m2 || !state.studioFile) return;
+      m2.src = videoPlayUrl(state.studioFile, clamped);
+      m2.playbackRate = state.studioSpeed || 1;
+      m2.load();
+      if (autoplay) m2.play().catch(() => {});
+    }, 110);
   }
 
   function nlePushHistory() {

@@ -503,8 +503,7 @@ class AppBridge(QObject):
         )
         self._startup_worker.encoders_ready.connect(self._on_encoders_ready)
         self._startup_worker.cleanup_done.connect(self._on_startup_cleanup_done)
-        self._startup_worker.finished.connect(self._startup_worker.deleteLater)
-        self._aux_workers.append(self._startup_worker)
+        self._track_worker(self._startup_worker)
         self._startup_worker.start()
 
         self._log("Ядро запущено. Определение аппаратных видеокодеков...")
@@ -565,6 +564,23 @@ class AppBridge(QObject):
     @Slot(str, object)
     def _emit_on_main_thread(self, ev_type: str, data) -> None:
         self._emit(ev_type, data)
+
+    def _track_worker(self, w: QThread) -> None:
+        """Safely keep a QThread alive until Qt emits `finished` (prevents QThread destroyed-while-running crashes)."""
+        self._aux_workers.append(w)
+
+        def _cleanup() -> None:
+            try:
+                if w in self._aux_workers:
+                    self._aux_workers.remove(w)
+            except Exception:
+                pass
+            try:
+                w.deleteLater()
+            except Exception:
+                pass
+
+        w.finished.connect(_cleanup)
 
     def _emit(self, ev_type: str, data) -> None:
         if QThread.currentThread() != self.thread():
@@ -1019,8 +1035,7 @@ class AppBridge(QObject):
             self.config.proxy_url, self.config.twitch_oauth_token, self
         )
         w.ready.connect(self._on_snapshot_ready)
-        w.finished.connect(w.deleteLater)
-        self._aux_workers.append(w)
+        self._track_worker(w)
         w.start()
         return req_id
 
@@ -1060,8 +1075,6 @@ class AppBridge(QObject):
             return json.dumps({"ok": False, "error": str(exc)})
 
     def _cleanup_aux(self, w: QThread) -> None:
-        if w in self._aux_workers:
-            self._aux_workers.remove(w)
         w.deleteLater()
 
     # ------------------------------------------------------------------ VOD & Clips Browser
@@ -1073,8 +1086,7 @@ class AppBridge(QObject):
     def fetchCatalog(self, kind: str, username: str, period: str) -> None:
         w = _CatalogWorker(kind, username, period or "LAST_WEEK", self.config.twitch_oauth_token, self.config.proxy_url, self)
         w.ready.connect(self._on_catalog_ready)
-        w.finished.connect(w.deleteLater)
-        self._aux_workers.append(w)
+        self._track_worker(w)
         w.start()
 
     @Slot(str)
@@ -1236,8 +1248,7 @@ class AppBridge(QObject):
         self._toast("Тест AI-детектора", f"Сканируем видео для «{r.label}»...", "info")
         w = _BannerTestWorker(video_path, r, self)
         w.ready.connect(self._on_banner_test_ready)
-        w.finished.connect(w.deleteLater)
-        self._aux_workers.append(w)
+        self._track_worker(w)
         w.start()
 
     def _enqueue_blur_job(
@@ -1425,8 +1436,7 @@ class AppBridge(QObject):
             return
         w = _HighlightsWorker(mode, target_path, self)
         w.ready.connect(self._on_highlights_ready)
-        w.finished.connect(w.deleteLater)
-        self._aux_workers.append(w)
+        self._track_worker(w)
         w.start()
 
     @Slot(bool, str, str, int)
@@ -1451,8 +1461,7 @@ class AppBridge(QObject):
         self._toast("Загрузка чата VOD", "Скачиваем сообщения из Twitch GQL...", "info")
         w = _VodChatWorker(vod_url, base, deepcopy(self.config), self)
         w.ready.connect(self._on_vod_chat_done)
-        w.finished.connect(w.deleteLater)
-        self._aux_workers.append(w)
+        self._track_worker(w)
         w.start()
 
     @Slot(str, str)
@@ -1486,8 +1495,7 @@ class AppBridge(QObject):
         self._toast("AI YouTube", "Генерируем заголовки, описание и таймкоды...", "info")
         w = _YtMetaWorker(video_path, deepcopy(self.config), self)
         w.ready.connect(self._on_yt_meta_ready)
-        w.finished.connect(w.deleteLater)
-        self._aux_workers.append(w)
+        self._track_worker(w)
         w.start()
 
     @Slot(bool, str)
@@ -1503,8 +1511,7 @@ class AppBridge(QObject):
         self._toast("AI Конспект", "Анализируем чат, маркеры и субтитры...", "info")
         w = _DigestWorker(video_path, deepcopy(self.config), self)
         w.ready.connect(self._on_digest_ready)
-        w.finished.connect(w.deleteLater)
-        self._aux_workers.append(w)
+        self._track_worker(w)
         w.start()
 
     @Slot(str, result=str)
@@ -1815,11 +1822,9 @@ class AppBridge(QObject):
             if res.get("strip_path"):
                 bridge.allow_media_file(res["strip_path"])
             bridge._emit("studio_assets", res)
-            if aw in bridge._aux_workers:
-                bridge._aux_workers.remove(aw)
 
         aw.ready.connect(_done)
-        self._aux_workers.append(aw)
+        self._track_worker(aw)
         aw.start()
 
     @Slot(str)
@@ -1865,12 +1870,10 @@ class AppBridge(QObject):
             bridge._update_job(jid, progress=100 if ok else 0, status="Готово!" if ok else msg[:80], state="done" if ok else "error", output_path=out_path if ok else "")
             bridge._log(f"[NLE Студия] Экспорт {'завершён: ' + out_path if ok else 'ошибка: ' + msg}")
             bridge._toast("Экспорт проекта", f"Сохранено: {Path(out_path).name}" if ok else msg, "success" if ok else "error")
-            if nw in bridge._aux_workers:
-                bridge._aux_workers.remove(nw)
             bridge.refreshLibrary()
 
         nw.done.connect(_finish)
-        self._aux_workers.append(nw)
+        self._track_worker(nw)
         nw.start()
 
     @Slot(str, float, result=str)
@@ -1991,11 +1994,9 @@ class AppBridge(QObject):
             elif t_type == "game_events":
                 bridge._toast("AI Vision (Игровые события)", f"Найдено {len(d.get('events') or [])} событий", "success")
             bridge._emit("ai_suite_result", {"task": t_type, "data": d})
-            if w in bridge._aux_workers:
-                bridge._aux_workers.remove(w)
 
         w.done.connect(_on_done)
-        self._aux_workers.append(w)
+        self._track_worker(w)
         w.start()
 
     @Slot(result=str)
@@ -2039,11 +2040,9 @@ class AppBridge(QObject):
             bridge._log(f"[Локальный AI] {msg}")
             from app.ai_suite import detect_local_llm_status
             bridge._emit("local_ai_status", detect_local_llm_status())
-            if pw in bridge._aux_workers:
-                bridge._aux_workers.remove(pw)
 
         pw.done.connect(_on_pull)
-        self._aux_workers.append(pw)
+        self._track_worker(pw)
         pw.start()
 
     @Slot(str)
@@ -2146,11 +2145,9 @@ class AppBridge(QObject):
             tot = len(r.get("results") or [])
             bridge._toast("Автопостинг завершён", f"Успешно: {ok_cnt} из {tot}", "success" if ok_cnt == tot else "info")
             bridge._emit("publish_result", r)
-            if pubw in bridge._aux_workers:
-                bridge._aux_workers.remove(pubw)
 
         pubw.done.connect(_on_pub)
-        self._aux_workers.append(pubw)
+        self._track_worker(pubw)
         pubw.start()
 
     # ------------------------------------------------------------------ #41 Interactive Telegram Bot
@@ -2264,8 +2261,7 @@ class AppBridge(QObject):
             self.config.proxy_url, self.config.twitch_oauth_token, self
         )
         w.ready.connect(self._on_tg_snap_ready)
-        w.finished.connect(w.deleteLater)
-        self._aux_workers.append(w)
+        self._track_worker(w)
         w.start()
 
     # ------------------------------------------------------------------ Cloud Updates (GitHub Releases)
@@ -2549,9 +2545,8 @@ class AppBridge(QObject):
         cw.done.connect(lambda ok, msg: (
             bridge._log(f"[Облако] {msg}"),
             bridge._toast("Облачная выгрузка", msg, "success" if ok else "error"),
-            bridge._aux_workers.remove(cw) if cw in bridge._aux_workers else None,
         ))
-        self._aux_workers.append(cw)
+        self._track_worker(cw)
         cw.start()
 
     def _enqueue_autopilot_job(
@@ -2660,13 +2655,11 @@ class AppBridge(QObject):
                     bridge._trigger_cloud_upload(out_file)
             else:
                 bridge._toast(f"Автопилот {ch.username}", res.get("error", "Ошибка"), "error")
-            if apw in bridge._aux_workers:
-                bridge._aux_workers.remove(apw)
             bridge._autopilot_running = False
             bridge._pump_autopilot_queue()
 
         apw.done.connect(_on_done)
-        self._aux_workers.append(apw)
+        self._track_worker(apw)
         apw.start()
 
     @Slot(str, str)
@@ -2697,12 +2690,10 @@ class AppBridge(QObject):
             bridge._update_job(jid, progress=100 if ok else 0, status=msg[:80], state="done" if ok else "error", output_path=out_path if ok else "")
             bridge._log(f"[DMCA Shield] {p.name}: {msg}")
             bridge._toast("DMCA Music Shield", msg, "success" if ok else "error")
-            if dw in bridge._aux_workers:
-                bridge._aux_workers.remove(dw)
             bridge.refreshLibrary()
 
         dw.done.connect(_done)
-        self._aux_workers.append(dw)
+        self._track_worker(dw)
         dw.start()
 
     @Slot(result=str)
@@ -2737,11 +2728,9 @@ class AppBridge(QObject):
             bridge._log(f"[YouTube OAuth] {msg}")
             bridge._toast("YouTube Аккаунт", msg, "success" if ok else "error")
             bridge._emit("yt_account", st if st else json.loads(bridge.getYouTubeAccountStatus()))
-            if aw in bridge._aux_workers:
-                bridge._aux_workers.remove(aw)
 
         aw.done.connect(_finish)
-        self._aux_workers.append(aw)
+        self._track_worker(aw)
         aw.start()
 
     @Slot(result=str)
@@ -2816,9 +2805,8 @@ class AppBridge(QObject):
             bridge._log(f"[MP4 Doctor] {msg}"),
             bridge._toast("MP4 / MKV Doctor", msg, "success" if ok else "error"),
             bridge.scanLibrary() if ok else None,
-            bridge._aux_workers.remove(rw) if rw in bridge._aux_workers else None,
         ))
-        self._aux_workers.append(rw)
+        self._track_worker(rw)
         rw.start()
 
     @Slot(str, str)
@@ -2851,9 +2839,8 @@ class AppBridge(QObject):
         ow.done.connect(lambda ok, data, msg: (
             bridge._toast("OBS Studio", msg, "success" if ok else "error"),
             bridge._emit("obs_result", {"action": action, "ok": ok, "data": data, "message": msg}),
-            bridge._aux_workers.remove(ow) if ow in bridge._aux_workers else None,
         ))
-        self._aux_workers.append(ow)
+        self._track_worker(ow)
         ow.start()
 
     @Slot(result=str)

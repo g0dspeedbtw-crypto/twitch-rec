@@ -162,7 +162,8 @@ def check_github_update(
         if str(a.get("name") or "").upper() == "SHA256SUMS.TXT":
             checksum_url = str(a.get("browser_download_url") or "")
             break
-    available = is_newer_version(latest, current_version)
+    # Only report update as available once an actual installer/archive for THIS OS is published
+    available = is_newer_version(latest, current_version) and bool(asset_url)
     frozen = getattr(sys, "frozen", False)
     can_self = bool(
         frozen
@@ -372,14 +373,18 @@ for _ in $(seq 1 120); do
   fi
   sleep 0.25
 done
+sleep 0.6
 
 rm -rf "$BACKUP"
 mv "$TARGET" "$BACKUP"
-if mv "$NEW_APP" "$TARGET"; then
-  xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
+if ditto "$NEW_APP" "$TARGET"; then
+  xattr -cr "$TARGET" 2>/dev/null || true
+  codesign --force --deep --sign - "$TARGET" 2>/dev/null || true
   rm -rf "$BACKUP" "$STAGE" "$ARCHIVE"
+  sleep 0.5
   open -n "$TARGET"
 else
+  rm -rf "$TARGET" 2>/dev/null || true
   mv "$BACKUP" "$TARGET" || true
 fi
 rm -f "$0"
@@ -420,6 +425,7 @@ for ($i = 0; $i -lt 120; $i++) {{
     if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) {{ break }}
     Start-Sleep -Milliseconds 250
 }}
+Start-Sleep -Milliseconds 900
 $srcDir = '{str(new_root).replace("'", "''")}'
 $dstDir = '{str(install_dir).replace("'", "''")}'
 $stageDir = '{str(stage_dir).replace("'", "''")}'
@@ -427,15 +433,24 @@ $archivePath = '{str(src).replace("'", "''")}'
 
 # Preserve user data: config.json, recordings/, templates/
 $skipNames = @('config.json', 'recordings', 'templates')
-Get-ChildItem -Path $srcDir -Force | ForEach-Object {{
-    if ($skipNames -contains $_.Name) {{ return }}
-    $dest = Join-Path $dstDir $_.Name
-    if ($_.PSIsContainer) {{
-        if (Test-Path $dest) {{ Remove-Item -Recurse -Force $dest }}
-        Copy-Item -Path $_.FullName -Destination $dest -Recurse -Force
-    }} else {{
-        Copy-Item -Path $_.FullName -Destination $dest -Force
+for ($attempt = 1; $attempt -le 4; $attempt++) {{
+    $hadErr = $false
+    Get-ChildItem -Path $srcDir -Force | ForEach-Object {{
+        if ($skipNames -contains $_.Name) {{ return }}
+        $dest = Join-Path $dstDir $_.Name
+        try {{
+            if ($_.PSIsContainer) {{
+                if (Test-Path $dest) {{ Remove-Item -Recurse -Force $dest -ErrorAction Stop }}
+                Copy-Item -Path $_.FullName -Destination $dest -Recurse -Force -ErrorAction Stop
+            }} else {{
+                Copy-Item -Path $_.FullName -Destination $dest -Force -ErrorAction Stop
+            }}
+        }} catch {{
+            $hadErr = $true
+        }}
     }}
+    if (-not $hadErr) {{ break }}
+    Start-Sleep -Milliseconds 800
 }}
 
 Remove-Item -Recurse -Force $stageDir

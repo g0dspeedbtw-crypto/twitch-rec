@@ -1315,7 +1315,7 @@ EXPORT_PRESETS = {
 }
 
 
-def extract_timeline_assets(video_path: str, num_frames: int = 12, num_peaks: int = 120) -> dict:
+def extract_timeline_assets(video_path: str, num_frames: int = 8, num_peaks: int = 96) -> dict:
     """
     Fast NLE timeline asset generator:
       1. Filmstrip sprite image (num_frames thumbnails stitched horizontally)
@@ -1387,20 +1387,20 @@ def extract_timeline_assets(video_path: str, num_frames: int = 12, num_peaks: in
     # 2. Generate Audio Waveform peaks (fast 4kHz mono s16le downmix, capped at first 4h or sampled)
     if not peaks:
         try:
-            # For very long videos (> 20 min), sample 24 evenly spaced windows so waveform computes in < 1.5s
-            if dur > 1200:
-                buckets = max(24, min(num_peaks, 60))
+            # For long videos (> 10 min), sample 16 fast 1-second windows so waveform finishes in ~1s
+            if dur > 600:
+                buckets = 16
                 raw_vals: List[float] = []
                 for i in range(buckets):
                     ts = (dur * i) / buckets
                     p = subprocess.run(
                         [
                             ffmpeg, "-hide_banner", "-loglevel", "error",
-                            "-ss", f"{ts:.1f}", "-t", "3", "-i", video_path,
+                            "-ss", f"{ts:.1f}", "-t", "1", "-i", video_path,
                             "-vn", "-ac", "1", "-ar", "4000", "-f", "s16le", "pipe:1",
                         ],
                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                        creationflags=CREATE_NO_WINDOW, timeout=8,
+                        creationflags=CREATE_NO_WINDOW, timeout=6,
                     )
                     data = p.stdout or b""
                     n_s = len(data) // 2
