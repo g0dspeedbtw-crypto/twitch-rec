@@ -986,8 +986,11 @@ class AppBridge(QObject):
                 normalize_audio=self.config.normalize_audio_default,
                 force_now=False,
             )
-        elif self.config.cloud_upload_enabled:
-            self._trigger_cloud_upload(file_path)
+        elif self.config.gdrive_enabled or self.config.cloud_upload_enabled:
+            if self.config.gdrive_enabled:
+                self._enqueue_gdrive_upload(file_path, subfolder=ch.username)
+            if self.config.cloud_upload_enabled:
+                self._trigger_cloud_upload(file_path)
 
     @Slot(str, list, bool, bool)
     def _on_rec_finished(self, key: str, files: list, ok: bool, needs_post_blur: bool) -> None:
@@ -1012,6 +1015,9 @@ class AppBridge(QObject):
                 for fp in remaining:
                     self._enqueue_blur_job(fp, ch.blur_regions, delete_original=not ch.keep_original, normalize_audio=self.config.normalize_audio_default, force_now=False)
             else:
+                if self.config.gdrive_enabled:
+                    for fp in remaining:
+                        self._enqueue_gdrive_upload(fp, subfolder=ch.username if ch else "")
                 if self.config.cloud_upload_enabled:
                     for fp in remaining:
                         self._trigger_cloud_upload(fp)
@@ -1333,6 +1339,8 @@ class AppBridge(QObject):
             self._toast("Блюр готов", Path(out_path).name, "success")
             if self.config.notify_on_blur:
                 send_notification_async(self.config, "Блюр видео готов", Path(out_path).name, log_cb=self._log)
+            if self.config.gdrive_enabled:
+                self._enqueue_gdrive_upload(out_path, subfolder=Path(out_path).parent.name)
         elif not ok:
             j = self.jobs.get(jid) or {}
             st_txt = j.get("status") or "Ошибка FFmpeg"
@@ -1686,6 +1694,7 @@ class AppBridge(QObject):
             "youtube_client_secrets", "vk_access_token", "vk_group_id",
             "vod_rate_limit_mbps", "cloud_upload_enabled", "cloud_upload_dir",
             "cloud_webdav_url", "cloud_webdav_user", "cloud_webdav_pass", "cloud_delete_local_after_upload",
+            "gdrive_enabled", "gdrive_client_secrets", "gdrive_folder_name", "gdrive_delete_local_after",
             "obs_ws_host", "obs_ws_port", "obs_ws_password",
             "mobile_remote_enabled", "mobile_remote_port", "mobile_remote_pin",
             "chat_position", "chat_font_size", "chat_hide_bots", "watermark_path",
@@ -2757,6 +2766,128 @@ class AppBridge(QObject):
         self._emit("yt_account", st)
         self._toast("YouTube Аккаунт", "Вы вышли из аккаунта YouTube", "info")
         return json.dumps(st, ensure_ascii=False)
+
+    # ------------------------------------------------------------------ v5.2.0 Google Drive Streaming Cloud Upload
+    @Slot(result=str)
+    def getGDriveStatus(self) -> str:
+        from app.gdrive import get_gdrive_status
+        return json.dumps(get_gdrive_status(self.config), ensure_ascii=False)
+
+    @Slot(str)
+    def gdriveLogin(self, secrets_path: str = "") -> None:
+        sp = (secrets_path or "").strip()
+        if sp:
+            self.config.gdrive_client_secrets = sp
+            self.config.save()
+        from app.gdrive import get_gdrive_status
+        st0 = get_gdrive_status(self.config)
+        if not st0.get("has_secrets"):
+            self._toast("Google Диск", "Сначала выберите client_secrets.json (подойдёт тот же JSON, что и для YouTube)", "error")
+            return
+        self._toast("Вход в Google Диск", "Открываем браузер для подключения Google Диска...", "info")
+        cfg_copy = deepcopy(self.config)
+        bridge = self
+
+        class _GDriveAuthWorker(QThread):
+            done = Signal(bool, str, dict)
+
+            def run(self) -> None:
+                from app.gdrive import gdrive_oauth_login
+                ok, msg, st = gdrive_oauth_login(cfg_copy)
+                self.done.emit(ok, msg, st)
+
+        gw = _GDriveAuthWorker(self)
+
+        def _finish(ok: bool, msg: str, st: dict) -> None:
+            bridge._log(f"[Google Диск] {msg}")
+            bridge._toast("Google Диск", msg, "success" if ok else "error")
+            bridge._emit("gdrive_status", st)
+
+        gw.done.connect(_finish)
+        self._track_worker(gw)
+        gw.start()
+
+    @Slot(result=str)
+    def gdriveLogout(self) -> str:
+        from app.gdrive import gdrive_oauth_logout, get_gdrive_status
+        gdrive_oauth_logout()
+        st = get_gdrive_status(self.config)
+        self._emit("gdrive_status", st)
+        self._toast("Google Диск", "Вы вышли из аккаунта Google Диска", "info")
+        return json.dumps(st, ensure_ascii=False)
+
+    @Slot(str)
+    def uploadFileToGDrive(self, video_path: str) -> None:
+        if not video_path or not os.path.exists(video_path):
+            self._toast("Google Диск", "Файл не найден", "error")
+            return
+        self._enqueue_gdrive_upload(video_path, subfolder=Path(video_path).parent.name, force_delete=None)
+
+    def _enqueue_gdrive_upload(self, file_path: str, subfolder: str = "", force_delete: Optional[bool] = None) -> None:
+        if not hasattr(self, "_gdrive_queue"):
+            self._gdrive_queue = []
+            self._gdrive_running = False
+        p = Path(file_path)
+        if not p.exists():
+            return
+        del_loc = bool(self.config.gdrive_delete_local_after) if force_delete is None else bool(force_delete)
+        jid = uuid.uuid4().hex[:8]
+        self._register_job(
+            jid, "blur",
+            f"☁️ Google Диск: {p.name}",
+            "В очереди загрузки" + (" (с очисткой SSD)" if del_loc else ""),
+            "queued",
+        )
+        self._gdrive_queue.append({
+            "jid": jid,
+            "file_path": str(p),
+            "subfolder": subfolder,
+            "delete_local": del_loc,
+            "config": deepcopy(self.config),
+        })
+        self._pump_gdrive_queue()
+
+    def _pump_gdrive_queue(self) -> None:
+        if getattr(self, "_gdrive_running", False):
+            return
+        q = getattr(self, "_gdrive_queue", [])
+        if not q:
+            return
+        item = q.pop(0)
+        self._gdrive_running = True
+        jid = item["jid"]
+        bridge = self
+
+        class _GDriveUpWorker(QThread):
+            prog = Signal(int, str)
+            done = Signal(bool, str, str)
+
+            def run(self) -> None:
+                from app.gdrive import upload_file_to_gdrive
+                ok, msg, url = upload_file_to_gdrive(
+                    item["config"],
+                    item["file_path"],
+                    subfolder=item["subfolder"],
+                    delete_local=item["delete_local"],
+                    progress_cb=lambda pct, txt: self.prog.emit(pct, txt),
+                )
+                self.done.emit(ok, msg, url)
+
+        uw = _GDriveUpWorker(self)
+        uw.prog.connect(lambda pct, txt: bridge._update_job(jid, progress=pct, status=txt, state="running"))
+
+        def _done(ok: bool, msg: str, url: str) -> None:
+            bridge._update_job(jid, progress=100 if ok else 0, status=msg[:85], state="done" if ok else "error")
+            bridge._log(f"[Google Диск] {msg}" + (f" ({url})" if url else ""))
+            bridge._toast("Google Диск", msg, "success" if ok else "error")
+            bridge._gdrive_running = False
+            bridge._pump_gdrive_queue()
+            if ok and item["delete_local"]:
+                bridge.refreshLibrary()
+
+        uw.done.connect(_done)
+        self._track_worker(uw)
+        uw.start()
 
     def _check_scheduled_posts(self) -> None:
         from app.broadcast_suite import load_scheduled_posts, save_scheduled_posts

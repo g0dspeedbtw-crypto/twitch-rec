@@ -42,7 +42,7 @@ def get_data_dir() -> Path:
 
 BASE_DIR = get_resource_dir()
 DATA_DIR = get_data_dir()
-APP_VERSION = "5.1.4"
+APP_VERSION = "5.2.0"
 DEFAULT_GITHUB_REPO = "g0dspeedbtw-crypto/twitch-rec"
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -374,6 +374,11 @@ class AppConfig:
     cloud_webdav_user: str = ""
     cloud_webdav_pass: str = ""
     cloud_delete_local_after_upload: bool = False
+    # v5.2.0 Google Drive Streaming Cloud Recording
+    gdrive_enabled: bool = False
+    gdrive_client_secrets: str = ""
+    gdrive_folder_name: str = "TwitchRecorderPro"
+    gdrive_delete_local_after: bool = True
     obs_ws_host: str = "127.0.0.1"
     obs_ws_port: int = 4455
     obs_ws_password: str = ""
@@ -616,6 +621,10 @@ class AppConfig:
             cloud_webdav_user=str(raw.get("cloud_webdav_user", "")),
             cloud_webdav_pass=str(raw.get("cloud_webdav_pass", "")),
             cloud_delete_local_after_upload=bool(raw.get("cloud_delete_local_after_upload", False)),
+            gdrive_enabled=bool(raw.get("gdrive_enabled", False)),
+            gdrive_client_secrets=str(raw.get("gdrive_client_secrets", "")),
+            gdrive_folder_name=str(raw.get("gdrive_folder_name", "TwitchRecorderPro") or "TwitchRecorderPro"),
+            gdrive_delete_local_after=bool(raw.get("gdrive_delete_local_after", True)),
             obs_ws_host=str(raw.get("obs_ws_host", "127.0.0.1")),
             obs_ws_port=max(1, int(raw.get("obs_ws_port", 4455))),
             obs_ws_password=str(raw.get("obs_ws_password", "")),

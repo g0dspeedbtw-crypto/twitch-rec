@@ -250,6 +250,11 @@
             <span class="switch-track"></span>
             <span>🌙 Сон после записи</span>
           </label>
+          <label class="switch-inline" title="Автоматически выгружать каждую готовую часть на Google Диск и очищать с ПК" style="background:rgba(255,255,255,0.03);border:1px solid var(--border);padding:7px 12px;border-radius:10px;">
+            <input type="checkbox" id="liveGdriveToggle" ${state.config.gdrive_enabled ? "checked" : ""}/>
+            <span class="switch-track"></span>
+            <span>☁️ В Google Диск</span>
+          </label>
           <button class="btn btn-subtle" id="btnCheckNow">${iconSvg("refresh", 15)}<span>Обновить</span></button>
           <button class="btn ${onlineCnt > 0 ? "btn-success" : "btn-subtle"}" id="btnRecAll" ${onlineCnt === 0 ? "disabled" : ""}>${iconSvg("record", 13)}<span>Записать всех${onlineCnt > 0 ? ` (${onlineCnt})` : ""}</span></button>
           <button class="btn ${recCnt > 0 ? "btn-danger" : "btn-subtle"}" id="btnStopAll" ${recCnt === 0 ? "disabled" : ""}>${iconSvg("stop", 13)}<span>Стоп всем${recCnt > 0 ? ` (${recCnt})` : ""}</span></button>
@@ -313,6 +318,28 @@
         try { state.config = JSON.parse(res); } catch {}
       }
       showToast("Ночной режим сна", e.target.checked ? "Компьютер уснёт сам, когда все записи и блюр завершатся" : "Авто-сон после записи выключен", "info");
+    };
+    $("#liveGdriveToggle").onchange = async (e) => {
+      const on = e.target.checked;
+      if (on) {
+        try {
+          const st = JSON.parse((await callBackend("getGDriveStatus")) || "{}");
+          if (!st.connected) {
+            e.target.checked = false;
+            state.settingsSub = "system";
+            switchPage("settings");
+            showToast("Google Диск", "Сначала войдите в Google Диск в Настройках → Система и Трей", "info");
+            return;
+          }
+        } catch {}
+      }
+      state.config.gdrive_enabled = on;
+      await callBackend("saveSettings", JSON.stringify({ gdrive_enabled: on }));
+      showToast(
+        on ? "☁️ Запись в Google Диск включена" : "☁️ Запись в Google Диск выключена",
+        on ? "Каждая готовая часть будет улетать на Google Диск" + (state.config.gdrive_delete_local_after !== false ? " и удаляться с ПК" : "") : "Записи будут храниться только на ПК",
+        on ? "success" : "info"
+      );
     };
     $("#btnCheckNow").onclick = () => { callBackend("checkChannels"); showToast("Проверка эфиров", "Обновляем статусы каналов...", "info"); };
     $("#btnRecAll").onclick = () => callBackend("recordAllOnline");
@@ -712,6 +739,7 @@
                 <button class="btn btn-soft btn-sm act-to-blur" data-path="${esc(f.path)}">${iconSvg("blur", 13)}<span>Блюр</span></button>
                 <button class="btn btn-subtle btn-sm act-to-studio" data-path="${esc(f.path)}">${iconSvg("scissors", 13)}<span>Монтаж</span></button>
                 <button class="btn-icon act-to-pub" data-path="${esc(f.path)}" title="Отправить в Автопостинг (YouTube / TikTok / Telegram)">${iconSvg("upload", 14)}</button>
+                <button class="btn-icon act-gdrive" data-path="${esc(f.path)}" title="Загрузить на Google Диск">☁️</button>
                 <button class="btn-icon act-repair" data-path="${esc(f.path)}" title="MP4 / MKV Doctor: проверить и починить файл для монтажа">${iconSvg("refresh", 14)}</button>
                 <button class="btn-icon act-tg-pub" data-path="${esc(f.path)}" data-name="${esc(f.name)}" title="Быстро отправить в Telegram">${iconSvg("bell", 14)}</button>
                 <button class="btn-icon act-reveal" data-path="${esc(f.path)}" title="Показать в проводнике">${iconSvg("folder", 14)}</button>
@@ -737,6 +765,9 @@
     });
     wrap.querySelectorAll(".act-to-pub").forEach((el) => {
       el.onclick = () => { state.pub.videoPath = el.dataset.path; switchPage("publish"); };
+    });
+    wrap.querySelectorAll(".act-gdrive").forEach((el) => {
+      el.onclick = () => callBackend("uploadFileToGDrive", el.dataset.path);
     });
     wrap.querySelectorAll(".act-repair").forEach((el) => {
       el.onclick = () => callBackend("repairVideoFile", el.dataset.path);
@@ -2921,6 +2952,42 @@
         <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:14px;">
           <div class="setting-row">
             <div>
+              <div class="setting-row-title">☁️ Потоковая запись в Google Диск (экономия SSD)</div>
+              <div class="setting-row-desc">Каждая записанная часть (напр. 15/30/60 мин) сразу загружается на Google Диск и удаляется с ПК после подтверждения</div>
+            </div>
+            <label class="switch-inline"><input type="checkbox" id="cfgGdriveOn" ${c.gdrive_enabled ? "checked" : ""}/><span class="switch-track"></span></label>
+          </div>
+          <div id="gdriveAuthBox" style="margin:8px 0 10px;">
+            ${state.gdriveStatus?.connected ? `
+              <div class="local-ai-banner" style="margin-bottom:0;">
+                <div style="font-size:12.5px;font-weight:700;color:#4ade80;">✅ Google Диск подключён: ${esc(state.gdriveStatus.email || "Аккаунт Google")}</div>
+                <div class="input-row" style="gap:6px;">
+                  <button type="button" class="btn btn-subtle btn-sm" id="btnGdriveLogin">Сменить</button>
+                  <button type="button" class="btn btn-danger-ghost btn-sm" id="btnGdriveLogout">Выйти</button>
+                </div>
+              </div>
+            ` : `
+              <div class="input-row" style="gap:8px;flex-wrap:wrap;">
+                <input class="input" id="cfgGdriveSecrets" style="flex:1;min-width:220px;" value="${esc(c.gdrive_client_secrets || c.youtube_client_secrets || "")}" placeholder="Путь к client_secrets.json (подходит тот же JSON, что от YouTube)..." />
+                <button type="button" class="btn btn-subtle btn-sm" id="btnGdrivePickJson">${iconSvg("folder", 14)}<span>Выбрать JSON</span></button>
+                <button type="button" class="btn btn-primary btn-sm" id="btnGdriveLogin">☁️ Войти в Google Диск</button>
+              </div>
+              <div style="font-size:11.5px;color:var(--text-muted);margin-top:5px;">
+                В Google Cloud Console включите <strong>Google Drive API</strong> в том же проекте (<a href="#" id="linkGdriveApi" style="color:var(--accent-light);text-decoration:underline;">открыть</a>).
+              </div>
+            `}
+          </div>
+          <div class="form-grid-2" style="margin-bottom:8px;">
+            <div class="field"><label>Папка на Google Диске</label><input class="input" id="cfgGdriveFolder" value="${esc(c.gdrive_folder_name || "TwitchRecorderPro")}" placeholder="TwitchRecorderPro" /></div>
+            <div class="field" style="justify-content:flex-end;">
+              <label class="switch-inline" style="margin-top:18px;"><input type="checkbox" id="cfgGdriveDel" ${c.gdrive_delete_local_after !== false ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12.5px;">Удалять с ПК сразу после загрузки на Google Диск</span></label>
+            </div>
+          </div>
+        </div>
+
+        <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:14px;">
+          <div class="setting-row">
+            <div>
               <div class="setting-row-title">☁️ Авто-выгрузка готовых записей в облако (Яндекс.Диск WebDAV / Nextcloud / NAS)</div>
               <div class="setting-row-desc">После завершения записи автоматически копирует видео в облачную папку или на WebDAV-сервер</div>
             </div>
@@ -3065,6 +3132,10 @@
       cloud_webdav_user: $("#cfgWebdavUser")?.value.trim() || "",
       cloud_webdav_pass: $("#cfgWebdavPass")?.value || "",
       cloud_delete_local_after_upload: $("#cfgCloudDelLoc")?.checked || false,
+      gdrive_enabled: $("#cfgGdriveOn")?.checked || false,
+      gdrive_client_secrets: $("#cfgGdriveSecrets")?.value.trim() || c.gdrive_client_secrets || "",
+      gdrive_folder_name: $("#cfgGdriveFolder")?.value.trim() || "TwitchRecorderPro",
+      gdrive_delete_local_after: $("#cfgGdriveDel")?.checked ?? true,
       obs_ws_host: $("#cfgObsHost")?.value.trim() || "127.0.0.1",
       obs_ws_port: Math.max(1, Number($("#cfgObsPort")?.value) || 4455),
       obs_ws_password: $("#cfgObsPass")?.value || "",
@@ -3158,6 +3229,28 @@
     };
     bindSettingsUpdateEvents(collectSettings);
     bindYouTubeAccountBoxEvents("setYt");
+    $("#btnGdrivePickJson")?.addEventListener("click", async () => {
+      const f = await callBackend("pickFile", "Google OAuth JSON (*.json)");
+      if (f) {
+        if ($("#cfgGdriveSecrets")) $("#cfgGdriveSecrets").value = f;
+        state.config.gdrive_client_secrets = f;
+        if (state.settingsDraft) state.settingsDraft.gdrive_client_secrets = f;
+      }
+    });
+    $("#btnGdriveLogin")?.addEventListener("click", () => {
+      const sp = $("#cfgGdriveSecrets")?.value.trim() || state.config.gdrive_client_secrets || state.config.youtube_client_secrets || "";
+      callBackend("gdriveLogin", sp);
+    });
+    $("#btnGdriveLogout")?.addEventListener("click", () => callBackend("gdriveLogout"));
+    $("#linkGdriveApi")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      callBackend("openExternalUrl", "https://console.cloud.google.com/apis/library/drive.googleapis.com");
+    });
+    if (!state.gdriveStatus) {
+      callBackend("getGDriveStatus").then((raw) => {
+        try { state.gdriveStatus = JSON.parse(raw || "{}"); if (state.page === "settings") renderSettingsPage(); } catch {}
+      });
+    }
     if (!state.ytAccount) {
       callBackend("getYouTubeAccountStatus").then((raw) => {
         try { state.ytAccount = JSON.parse(raw || "{}"); if (state.page === "settings") renderSettingsPage(); } catch {}
@@ -4335,6 +4428,9 @@
       state.ytAccount = data || null;
       if (state.page === "publish") renderPublishPage();
       else if (state.page === "settings") renderSettingsPage();
+    } else if (type === "gdrive_status") {
+      state.gdriveStatus = data || null;
+      if (state.page === "settings") renderSettingsPage();
     } else if (type === "studio_assets") {
       if (data && data.video_path === state.studioFile) {
         state.nle.stripPath = data.strip_path || "";
