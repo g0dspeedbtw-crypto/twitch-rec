@@ -410,7 +410,7 @@ class LiveRecorderWorker(QThread):
             "--hls-live-restart",
             "--ringbuffer-size", "32M",
             "--stream-segment-timeout", "15",
-            "--stream-timeout", "30",
+            "--stream-timeout", "120",
             "--stream-segment-attempts", "4",
             "--stream-segment-threads", "2",
             "--retry-streams", "4",
