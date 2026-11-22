@@ -427,14 +427,34 @@ def run_full_autopilot_for_file(
             if part_number > 0
             else (pkg.get("thumb_subtitle") or stream_game or "ПОЛНАЯ ЗАПИСЬ")
         )
-        ok_t, _ = generate_youtube_thumbnail(
-            work_video,
-            thumb_out,
-            timestamp_sec=best_ts,
-            headline=hl_txt,
-            subtitle=sub_txt[:34],
-            accent_color="#9146ff",
-        )
+        ap_prompt = (getattr(channel, "autopilot_thumb_prompt", "") or "").strip()
+        ap_ref = (getattr(channel, "autopilot_thumb_ref", "") or "").strip()
+        ap_tmode = getattr(channel, "autopilot_thumb_mode", "stream_frame") or "stream_frame"
+        if ap_prompt or ap_ref or ap_tmode == "flux_ai":
+            from .thumb_ai import generate_prompt_thumbnail
+            ok_t, _, eng_t = generate_prompt_thumbnail(
+                work_video,
+                thumb_out,
+                ap_prompt or f"{stream_game or channel.username} epic stream highlight",
+                cfg,
+                mode=ap_tmode,
+                ref_image_path=ap_ref,
+                composite_ref=bool(ap_ref),
+                timestamp_sec=best_ts,
+                headline=hl_txt,
+                subtitle=sub_txt[:34],
+            )
+            if ok_t:
+                _log(f"[{channel.username}] Автопилот {part_tag}: обложка по промпту ({eng_t})")
+        else:
+            ok_t, _ = generate_youtube_thumbnail(
+                work_video,
+                thumb_out,
+                timestamp_sec=best_ts,
+                headline=hl_txt,
+                subtitle=sub_txt[:34],
+                accent_color="#9146ff",
+            )
         if ok_t and os.path.exists(thumb_out):
             thumb_path = thumb_out
             report["thumbnail_path"] = thumb_path

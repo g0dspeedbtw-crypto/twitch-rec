@@ -88,6 +88,10 @@
       thumbSubtitle: "TWITCH HIGHLIGHTS",
       thumbAccent: "#8b5cf6",
       thumbTs: "00:15",
+      thumbPrompt: "",
+      thumbMode: "flux_ai",
+      thumbRefPath: "",
+      thumbCompositeRef: true,
       privacy: "unlisted",
       clipStart: "00:00:00",
       clipEnd: "00:01:00",
@@ -1968,9 +1972,21 @@
           <div class="color-swatch-row">
             ${swatches.map((col) => `<button type="button" class="color-swatch ${state.studioThumb.accent === col ? "active" : ""}" data-col="${col}" style="background:${col};"></button>`).join("")}
           </div>
-          <div class="form-grid-2" style="gap:6px;">
-            <button class="btn btn-soft btn-sm" id="btnBestFrames">🎯 5 лучших кадров</button>
-            <button class="btn btn-primary btn-sm" id="btnCreateThumb">🖼 Сохранить JPG</button>
+          <div class="field"><label>✨ Промпт для обложки + 📎 Фото-референс</label>
+            <input class="input" id="stThPrompt" value="${esc(state.studioThumb.prompt || "")}" placeholder="Напр.: стиль MrBeast, красный неон, эмоции..." />
+          </div>
+          <div class="input-row" style="gap:6px;flex-wrap:wrap;">
+            <select class="input-select compact" id="stThMode" style="flex:1;">
+              <option value="flux_ai" ${(state.studioThumb.mode || "flux_ai") === "flux_ai" ? "selected" : ""}>✨ Flux AI (нейросеть)</option>
+              <option value="stream_frame" ${state.studioThumb.mode === "stream_frame" ? "selected" : ""}>🎬 Кадр стрима + промпт</option>
+            </select>
+            <button type="button" class="btn btn-subtle btn-sm" id="btnStPickRef">${iconSvg("image", 13)}<span>${state.studioThumb.refPath ? "Фото ✓" : "Фото-реф."}</span></button>
+            ${state.studioThumb.refPath ? `<button type="button" class="btn-icon danger" id="btnStClearRef" title="Убрать фото">×</button>` : ""}
+          </div>
+          <div class="form-grid-3" style="gap:6px;">
+            <button class="btn btn-soft btn-sm" id="btnBestFrames">🎯 5 кадров</button>
+            <button class="btn btn-subtle btn-sm" id="btnCreateThumb">🖼 Кадр JPG</button>
+            <button class="btn btn-primary btn-sm" id="btnStGenPromptThumb">✨ По промпту</button>
           </div>
           ${state.aiBestFrames.length ? `
             <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:4px;">
@@ -2003,6 +2019,27 @@
         const raw = await callBackend("createThumbnail", JSON.stringify({ video_path: state.studioFile, timestamp_sec: parseSec($("#thTime").value) ?? getStudioTime(), headline: state.studioThumb.headline.trim() || "ЛУЧШИЙ МОМЕНТ", subtitle: state.studioThumb.subtitle.trim() || "TWITCH HIGHLIGHTS", accent_color: state.studioThumb.accent }));
         try { const res = JSON.parse(raw || "{}"); if (res.ok && res.output_path) { state.lastThumbPath = res.output_path; renderStudioInspector(); } } catch {}
       };
+      $("#stThPrompt")?.addEventListener("input", (e) => { state.studioThumb.prompt = e.target.value; });
+      $("#stThMode")?.addEventListener("change", (e) => { state.studioThumb.mode = e.target.value; });
+      $("#btnStPickRef")?.addEventListener("click", async () => {
+        const f = await callBackend("pickFile", "Фото-референс (*.jpg *.jpeg *.png *.webp)");
+        if (f) { state.studioThumb.refPath = f; renderStudioInspector(); }
+      });
+      $("#btnStClearRef")?.addEventListener("click", () => { state.studioThumb.refPath = ""; renderStudioInspector(); });
+      $("#btnStGenPromptThumb")?.addEventListener("click", () => {
+        callBackend("generatePromptThumbnail", JSON.stringify({
+          video_path: state.studioFile,
+          prompt: $("#stThPrompt")?.value.trim() || "",
+          mode: $("#stThMode")?.value || "flux_ai",
+          ref_image_path: state.studioThumb.refPath || "",
+          composite_ref: true,
+          timestamp_sec: parseSec($("#thTime")?.value) ?? getStudioTime(),
+          headline: state.studioThumb.headline.trim(),
+          subtitle: state.studioThumb.subtitle.trim(),
+          accent_color: state.studioThumb.accent,
+          target: "studio",
+        }));
+      });
       $("#btnRevealThumb")?.addEventListener("click", () => callBackend("openInExplorer", state.lastThumbPath));
     } else if (state.studioSub === "export") {
       const actClips = state.nle.clips.filter((c) => !c.disabled);
@@ -2312,17 +2349,48 @@
                 : `<div style="text-align:center;padding:20px;">${iconSvg("image", 32)}<div style="font-size:12.5px;margin-top:6px;">Нажмите «Сгенерировать обложку» ниже</div></div>`}
             </div>
             <div class="field" style="margin-bottom:8px;"><label>Заголовок на обложке</label><input class="input" id="pubThHead" value="${esc(pub.thumbHeadline)}" /></div>
-            <div class="form-grid-2" style="margin-bottom:10px;">
+            <div class="form-grid-2" style="margin-bottom:8px;">
               <div class="field"><label>Плашка сверху</label><input class="input" id="pubThSub" value="${esc(pub.thumbSubtitle)}" /></div>
               <div class="field"><label>Кадр (таймкод)</label><input class="input mono" id="pubThTs" value="${esc(pub.thumbTs)}" placeholder="00:15" /></div>
             </div>
-            <div class="input-row" style="justify-content:space-between;margin-bottom:10px;">
+            <div style="border-top:1px solid var(--border);padding-top:10px;margin:8px 0;">
+              <div class="field" style="margin-bottom:8px;">
+                <label>✨ Промпт для генерации обложки</label>
+                <input class="input" id="pubThPrompt" value="${esc(pub.thumbPrompt || "")}" placeholder="Напр.: стиль MrBeast, красный неон, взрыв, эмоции, «КЛАТЧ 1 В 5»..." />
+              </div>
+              <div class="form-grid-2" style="margin-bottom:8px;">
+                <div class="field">
+                  <label>Режим генерации</label>
+                  <select class="input-select" id="pubThMode">
+                    <option value="flux_ai" ${(pub.thumbMode || "flux_ai") === "flux_ai" ? "selected" : ""}>✨ Flux AI (нейросеть + референс)</option>
+                    <option value="stream_frame" ${pub.thumbMode === "stream_frame" ? "selected" : ""}>🎬 Кадр стрима + стиль по промпту</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>📎 Фото-референс (JPG/PNG)</label>
+                  <div class="input-row" style="gap:5px;">
+                    <button type="button" class="btn btn-subtle btn-sm" id="btnPubPickRef" style="flex:1;">${iconSvg("image", 13)}<span>${pub.thumbRefPath ? esc(pub.thumbRefPath.split(/[\\/]/).pop().slice(0, 14)) : "Выбрать фото"}</span></button>
+                    ${pub.thumbRefPath ? `<button type="button" class="btn-icon danger" id="btnPubClearRef" title="Убрать фото-референс">×</button>` : ""}
+                  </div>
+                </div>
+              </div>
+              ${pub.thumbRefPath ? `
+                <div class="input-row" style="justify-content:space-between;margin-bottom:8px;background:rgba(255,255,255,0.03);padding:6px 8px;border-radius:8px;border:1px solid var(--border);">
+                  <span style="font-size:11.5px;color:#4ade80;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📎 Референс: ${esc(pub.thumbRefPath.split(/[\\/]/).pop())}</span>
+                  <label class="switch-inline"><input type="checkbox" id="pubThCompRef" ${pub.thumbCompositeRef !== false ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:11.5px;">Вписать фото</span></label>
+                </div>
+              ` : ""}
+            </div>
+            <div class="input-row" style="justify-content:space-between;flex-wrap:wrap;gap:6px;margin-bottom:6px;">
               <div class="color-swatch-row">
                 ${["#8b5cf6", "#ef4444", "#22c55e", "#f59e0b", "#3b82f6", "#ec4899"].map((col) =>
                   `<button type="button" class="color-swatch ${pub.thumbAccent === col ? "active" : ""}" data-pcol="${col}" style="background:${col};"></button>`
                 ).join("")}
               </div>
-              <button class="btn btn-primary btn-sm" id="btnPubGenCover">${iconSvg("sparkles", 14)}<span>Сгенерировать обложку</span></button>
+              <div class="input-row" style="gap:6px;">
+                <button class="btn btn-subtle btn-sm" id="btnPubGenCover" title="Быстрая обложка с кадра">Кадр</button>
+                <button class="btn btn-primary btn-sm" id="btnPubGenPromptCover">${iconSvg("sparkles", 14)}<span>По промпту</span></button>
+              </div>
             </div>
           </div>
 
@@ -2438,6 +2506,31 @@
       } catch {}
     };
     $("#btnPubGenCover").onclick = genCover;
+    $("#pubThPrompt")?.addEventListener("input", (e) => { pub.thumbPrompt = e.target.value; });
+    $("#pubThMode")?.addEventListener("change", (e) => { pub.thumbMode = e.target.value; });
+    $("#pubThCompRef")?.addEventListener("change", (e) => { pub.thumbCompositeRef = e.target.checked; });
+    $("#btnPubPickRef")?.addEventListener("click", async () => {
+      const f = await callBackend("pickFile", "Фото-референс (*.jpg *.jpeg *.png *.webp)");
+      if (f) { pub.thumbRefPath = f; renderPublishPage(); }
+    });
+    $("#btnPubClearRef")?.addEventListener("click", () => { pub.thumbRefPath = ""; renderPublishPage(); });
+    $("#btnPubGenPromptCover")?.addEventListener("click", () => {
+      syncPubInputs();
+      pub.thumbPrompt = $("#pubThPrompt")?.value.trim() || "";
+      pub.thumbMode = $("#pubThMode")?.value || "flux_ai";
+      callBackend("generatePromptThumbnail", JSON.stringify({
+        video_path: pub.videoPath || "",
+        prompt: pub.thumbPrompt,
+        mode: pub.thumbMode,
+        ref_image_path: pub.thumbRefPath || "",
+        composite_ref: pub.thumbCompositeRef !== false,
+        timestamp_sec: parseSec(pub.thumbTs) ?? -1,
+        headline: pub.thumbHeadline.trim(),
+        subtitle: pub.thumbSubtitle.trim(),
+        accent_color: pub.thumbAccent,
+        target: "publish",
+      }));
+    });
 
     const genAiPkg = (alsoCover) => {
       syncPubInputs();
@@ -3905,6 +3998,20 @@
               <label class="switch-inline"><input type="checkbox" id="cdApYt" ${ch.autopilot_youtube_upload !== false ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Авто-загрузка на YouTube</span></label>
             </div>
           </div>
+          <div class="field">
+            <label>✨ Стиль и промпт обложки автопилота (опционально)</label>
+            <div class="input-row" style="gap:6px;margin-bottom:6px;">
+              <select class="input-select compact" id="cdApThMode" style="width:170px;">
+                <option value="stream_frame" ${(ch.autopilot_thumb_mode || "stream_frame") === "stream_frame" ? "selected" : ""}>🎬 Кадр стрима</option>
+                <option value="flux_ai" ${ch.autopilot_thumb_mode === "flux_ai" ? "selected" : ""}>✨ Flux AI</option>
+              </select>
+              <input class="input" id="cdApThPrompt" value="${esc(ch.autopilot_thumb_prompt || "")}" placeholder="Напр.: яркий красный неон, стиль MrBeast..." />
+            </div>
+            <div class="input-row" style="gap:6px;">
+              <input class="input" id="cdApThRef" value="${esc(ch.autopilot_thumb_ref || "")}" placeholder="Фото-референс (JPG/PNG) для обложек канала..." />
+              <button type="button" class="btn btn-subtle btn-sm" id="btnCdPickApRef">${iconSvg("image", 13)}<span>Фото</span></button>
+            </div>
+          </div>
           <div class="form-grid-2">
             <div class="field">
               <label class="switch-inline"><input type="checkbox" id="cdApShorts" ${ch.autopilot_make_shorts ? "checked" : ""}/><span class="switch-track"></span><span style="font-size:12px;">Нарезать Shorts 9:16</span></label>
@@ -3942,6 +4049,10 @@
       };
     });
     body.querySelectorAll(".day-pill").forEach((b) => { b.onclick = () => b.classList.toggle("active"); });
+    $("#btnCdPickApRef")?.addEventListener("click", async () => {
+      const f = await callBackend("pickFile", "Фото-референс (*.jpg *.jpeg *.png *.webp)");
+      if (f && $("#cdApThRef")) $("#cdApThRef").value = f;
+    });
     $("#chDrawer").classList.remove("hidden");
   }
 
@@ -3981,6 +4092,9 @@
         autopilot_per_segment: apPerSeg,
         autopilot_dmca_mode: $("#cdApDmca")?.value || "vocal_smart",
         autopilot_auto_thumb: $("#cdApThumb")?.checked ?? true,
+        autopilot_thumb_mode: $("#cdApThMode")?.value || "stream_frame",
+        autopilot_thumb_prompt: $("#cdApThPrompt")?.value.trim() || "",
+        autopilot_thumb_ref: $("#cdApThRef")?.value.trim() || "",
         autopilot_youtube_upload: $("#cdApYt")?.checked ?? true,
         autopilot_youtube_privacy: $("#cdApYtPriv")?.value || "unlisted",
         autopilot_make_shorts: $("#cdApShorts")?.checked || false,
@@ -4431,6 +4545,16 @@
     } else if (type === "gdrive_status") {
       state.gdriveStatus = data || null;
       if (state.page === "settings") renderSettingsPage();
+    } else if (type === "prompt_thumb_ready") {
+      if (data?.ok && data.output_path) {
+        if (data.target === "studio") {
+          state.lastThumbPath = data.output_path;
+          if (state.page === "studio") renderStudioInspector();
+        } else {
+          state.pub.thumbPath = data.output_path;
+          if (state.page === "publish") renderPublishPage();
+        }
+      }
     } else if (type === "studio_assets") {
       if (data && data.video_path === state.studioFile) {
         state.nle.stripPath = data.strip_path || "";

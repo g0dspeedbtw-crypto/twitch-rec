@@ -42,7 +42,7 @@ def get_data_dir() -> Path:
 
 BASE_DIR = get_resource_dir()
 DATA_DIR = get_data_dir()
-APP_VERSION = "5.2.0"
+APP_VERSION = "5.3.0"
 DEFAULT_GITHUB_REPO = "g0dspeedbtw-crypto/twitch-rec"
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -196,6 +196,9 @@ class ChannelConfig:
     autopilot_per_segment: bool = True          # Stream-process each finished segment (e.g. 1h) while next hour records
     autopilot_dmca_mode: str = "vocal_smart"    # "off" | "vocal_smart" | "shazam_smart"
     autopilot_auto_thumb: bool = True           # Auto-generate 1280x720 thumbnail from best frame
+    autopilot_thumb_mode: str = "stream_frame"  # "stream_frame" | "flux_ai"
+    autopilot_thumb_prompt: str = ""            # Custom prompt for channel thumbnails
+    autopilot_thumb_ref: str = ""               # Reference photo path (JPG/PNG) for channel thumbnails
     autopilot_youtube_upload: bool = True       # Auto-upload finished part/stream to YouTube
     autopilot_youtube_privacy: str = "unlisted" # "unlisted" | "private" | "public"
     autopilot_make_shorts: bool = False         # Also cut viral Shorts 9:16 from each part
@@ -538,6 +541,9 @@ class AppConfig:
                     autopilot_per_segment=bool(ch_raw.get("autopilot_per_segment", True)),
                     autopilot_dmca_mode=str(ch_raw.get("autopilot_dmca_mode", "vocal_smart")),
                     autopilot_auto_thumb=bool(ch_raw.get("autopilot_auto_thumb", True)),
+                    autopilot_thumb_mode=str(ch_raw.get("autopilot_thumb_mode", "stream_frame")),
+                    autopilot_thumb_prompt=str(ch_raw.get("autopilot_thumb_prompt", "")),
+                    autopilot_thumb_ref=str(ch_raw.get("autopilot_thumb_ref", "")),
                     autopilot_youtube_upload=bool(ch_raw.get("autopilot_youtube_upload", True)),
                     autopilot_youtube_privacy=str(ch_raw.get("autopilot_youtube_privacy", "unlisted")),
                     autopilot_make_shorts=bool(ch_raw.get("autopilot_make_shorts", False)),

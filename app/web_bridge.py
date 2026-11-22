@@ -765,7 +765,8 @@ class AppBridge(QObject):
             "auto_scene_by_game", "live_auto_clip", "auto_clip_threshold",
             "chat_trigger_words", "separate_audio_track",
             "autopilot_enabled", "autopilot_per_segment", "autopilot_dmca_mode",
-            "autopilot_auto_thumb", "autopilot_youtube_upload", "autopilot_youtube_privacy",
+            "autopilot_auto_thumb", "autopilot_thumb_mode", "autopilot_thumb_prompt", "autopilot_thumb_ref",
+            "autopilot_youtube_upload", "autopilot_youtube_privacy",
             "autopilot_make_shorts", "autopilot_shorts_count", "autopilot_send_telegram",
         ):
             if field_name in patch:
@@ -2822,6 +2823,73 @@ class AppBridge(QObject):
             self._toast("Google Диск", "Файл не найден", "error")
             return
         self._enqueue_gdrive_upload(video_path, subfolder=Path(video_path).parent.name, force_delete=None)
+
+    @Slot(str)
+    def generatePromptThumbnail(self, payload_json: str) -> None:
+        """v5.3.0 AI Thumbnail Generator by Prompt + Photo Reference (Mode 1: Stream Frame / Mode 2: Flux AI)."""
+        try:
+            d = json.loads(payload_json or "{}")
+        except Exception:
+            self._toast("AI Обложка", "Некорректные параметры", "error")
+            return
+        vp = str(d.get("video_path") or "").strip()
+        ref_p = str(d.get("ref_image_path") or "").strip()
+        if ref_p and os.path.exists(ref_p):
+            self._register_allowed_media_file(ref_p)
+        mode = str(d.get("mode") or "flux_ai")
+        prompt = str(d.get("prompt") or "").strip()
+        target = str(d.get("target") or "publish")
+        out_dir = Path(vp).parent if (vp and os.path.exists(vp)) else self.config.ensure_output_dir()
+        stem = Path(vp).stem if vp else "thumbnail"
+        out_jpg = str(out_dir / f"{stem}_ai_thumb_{uuid.uuid4().hex[:4]}.jpg")
+        cfg_copy = deepcopy(self.config)
+        bridge = self
+        self._toast(
+            "AI Генератор обложки",
+            "Нейросеть Flux AI рисует обложку по промпту и фото-референсу..." if mode == "flux_ai" else "Создаём обложку на кадре стрима по промпту...",
+            "info",
+        )
+
+        class _PromptThumbWorker(QThread):
+            done = Signal(bool, str, str)
+
+            def run(self) -> None:
+                from app.thumb_ai import generate_prompt_thumbnail
+                ok, path_or_err, eng = generate_prompt_thumbnail(
+                    vp,
+                    out_jpg,
+                    prompt,
+                    cfg_copy,
+                    mode=mode,
+                    ref_image_path=ref_p,
+                    composite_ref=bool(d.get("composite_ref", True)),
+                    timestamp_sec=float(d.get("timestamp_sec") if d.get("timestamp_sec") is not None else -1.0),
+                    headline=str(d.get("headline") or ""),
+                    subtitle=str(d.get("subtitle") or ""),
+                    accent_color=str(d.get("accent_color") or ""),
+                )
+                self.done.emit(ok, path_or_err, eng)
+
+        tw = _PromptThumbWorker(self)
+
+        def _finish(ok: bool, path_or_err: str, eng: str) -> None:
+            if ok and path_or_err:
+                bridge._register_allowed_media_file(path_or_err)
+                bridge._log(f"[AI Обложка] Готово ({eng}): {path_or_err}")
+                bridge._toast("Обложка готова!", f"Движок: {eng}", "success")
+            else:
+                bridge._toast("AI Обложка", path_or_err or "Не удалось создать обложку", "error")
+            bridge._emit("prompt_thumb_ready", {
+                "ok": ok,
+                "output_path": path_or_err if ok else "",
+                "error": "" if ok else path_or_err,
+                "engine": eng,
+                "target": target,
+            })
+
+        tw.done.connect(_finish)
+        self._track_worker(tw)
+        tw.start()
 
     def _enqueue_gdrive_upload(self, file_path: str, subfolder: str = "", force_delete: Optional[bool] = None) -> None:
         if not hasattr(self, "_gdrive_queue"):
